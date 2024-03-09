@@ -23,10 +23,10 @@ pub fn main() !void {
         var stream = std.io.fixedBufferStream(&buffer);
         var writer = stream.writer();
 
-        try dns.writeQuery(&writer, "diogok.net");
+        try dns.writeQuery(&writer, "example.com", .A);
         const req = stream.getWritten();
         log.info("Request, kinda: ({d}) {b}", .{ req.len, req });
-        _ = try os.send(sock, req, 0);
+        _ = try os.send(sock, req[0..28], 0);
     }
 
     log.info("Sent request", .{});
@@ -48,12 +48,7 @@ pub fn main() !void {
         stream.reset();
 
         const records = try dns.read_response(allocator, &reader);
-        defer {
-            for (records) |record| {
-                record.deinit();
-            }
-            allocator.free(records);
-        }
+        defer dns.free_records(records);
         log.info("Records: {any}", .{records});
     }
 
