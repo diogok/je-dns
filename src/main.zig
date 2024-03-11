@@ -21,9 +21,9 @@ pub fn main() !void {
     {
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
-        var writer = stream.writer();
+        const writer = stream.writer();
 
-        try dns.writeQuery(&writer, "example.com", .A);
+        try dns.writeQuery(writer, "google.com", .A);
         const req = stream.getWritten();
         log.info("Request, kinda: ({d}) {b}", .{ req.len, req });
         _ = try os.send(sock, req[0..28], 0);
@@ -37,41 +37,19 @@ pub fn main() !void {
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         var writer = stream.writer();
-        var reader = stream.reader();
+        const reader = stream.reader();
 
         var buffer0: [512]u8 = undefined;
         const recvd = try os.recv(sock, &buffer0, 0);
-        log.info("Received: {d}", .{recvd});
-        const writd = try writer.write(buffer0[0..recvd]);
-        log.info("Received: {d}", .{writd});
+        const written = try writer.write(buffer0[0..recvd]);
+        log.info("Reply, kinda: ({d}) {b}", .{ written, buffer0[0..written] });
 
         stream.reset();
 
-        const records = try dns.read_response(allocator, &reader);
-        defer dns.free_records(records);
-        log.info("Records: {any}", .{records});
+        const reply = try dns.read_reply(allocator, reader);
+        defer reply.deinit();
+        log.info("Reply: {any}", .{reply});
     }
 
     os.close(sock);
-}
-
-fn read_age() !void {
-    const out = std.io.getStdOut();
-    const writer = out.writer();
-
-    const in = std.io.getStdIn();
-    const reader = in.reader();
-
-    try writer.print("Hello!\n", .{});
-
-    var buffer: [1024]u8 = undefined;
-    var response_stream = std.io.fixedBufferStream(&buffer);
-    const response_writer = response_stream.writer();
-
-    try reader.streamUntilDelimiter(response_writer, '\n', 3);
-
-    const age = response_stream.getWritten();
-    const age_n = try std.fmt.parseInt(u8, age, 10);
-
-    try writer.print("You age is: {d}.\n", .{age_n});
 }

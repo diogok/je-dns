@@ -4,19 +4,21 @@ const os = std.os;
 
 const log = std.log.scoped(.with_dns);
 
-pub fn writeQuery(writer: anytype, name: []const u8, query_type: QueryType) !void {
+pub fn writeQuery(writer: anytype, name: []const u8, resource_type: ResourceType) !void {
+    // build header with flags
     const flags = Flags{
         .query_or_reply = .query,
         .opcode = .query,
         .recursion_desired = true,
         .recursion_available = true,
     };
+    log.info("Query flags: {any}", .{flags});
     const header = Header{
         .ID = mkid(),
         .flags = @bitCast(flags),
         .number_of_questions = 1,
     };
-    log.info("Q header: {any}", .{header});
+    log.info("Query header: {any}", .{header});
 
     // write header
     try writer.writeInt(u16, header.ID, .big);
@@ -26,19 +28,28 @@ pub fn writeQuery(writer: anytype, name: []const u8, query_type: QueryType) !voi
     try writer.writeInt(u16, header.number_of_authority_resource_records, .big);
     try writer.writeInt(u16, header.number_of_additional_resource_records, .big);
 
+    // build question
+    const question = Question{
+        .name = name,
+        .resource_type = resource_type,
+        .resource_class = .IN,
+    };
+    log.info("Query question: {any}", .{question});
+
     // write question section
-    try writeName(writer, name);
-    try writer.writeInt(u16, @intFromEnum(query_type), .big);
-    try writer.writeInt(u16, @intFromEnum(QueryClass.IN), .big);
-    log.info("Q header: {any}", .{header});
+    try writeName(writer, question.name);
+    try writer.writeInt(u16, @intFromEnum(question.resource_type), .big);
+    try writer.writeInt(u16, @intFromEnum(question.resource_class), .big);
+
+    log.info("Query done", .{});
 }
 
 test "Writing a query" {
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    var writer = stream.writer();
+    const writer = stream.writer();
 
-    try writeQuery(&writer, "example.com", .A);
+    try writeQuery(writer, "example.com", .A);
 
     const written = stream.getWritten();
     const example_query = [_]u8{
@@ -66,36 +77,63 @@ fn writeName(writer: anytype, name: []const u8) !void {
 test "Write a name" {
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    var writer = stream.writer();
+    const writer = stream.writer();
 
-    try writeName(&writer, "example.com");
+    try writeName(writer, "example.com");
     var written = stream.getWritten();
     try testing.expectEqualStrings("\x07example\x03com\x00", written);
 
     stream.reset();
 
-    try writeName(&writer, "www.example.com");
+    try writeName(writer, "www.example.com");
     written = stream.getWritten();
     try testing.expectEqualStrings("\x03www\x07example\x03com\x00", written);
 }
 
-pub fn read_response(allocator: std.mem.Allocator, reader: anytype) ![]Record {
+const Pack = std.PackedIntSliceEndian(u16, .big);
+
+pub fn read_reply(allocator: std.mem.Allocator, reader: anytype) !Reply {
     // read all of the request, because we might need the bytes for pointer labels
+    var pos: usize = 0;
     var buffer: [512]u8 = undefined;
     _ = try reader.read(&buffer);
 
-    // read header
-    var header = std.mem.bytesToValue(Header, buffer[0..12]);
-    std.mem.byteSwapAllFields(Header, &header);
-    log.info("R header: {any}", .{header});
+    const header_pack = Pack.init(buffer[0..12], 6);
+    const header = Header{
+        .ID = header_pack.get(0),
+        .flags = header_pack.get(1),
+        .number_of_questions = header_pack.get(2),
+        .number_of_answers = header_pack.get(3),
+        .number_of_authority_resource_records = header_pack.get(4),
+        .number_of_additional_resource_records = header_pack.get(5),
+    };
+    log.info("Reply header: {any}", .{header});
+    const flags: Flags = @bitCast(header.flags);
+    log.info("Reply flags: {any}", .{flags});
 
-    var pos: usize = 12;
+    pos += 12;
 
-    // skip questions
+    var questions = std.ArrayList(Question).init(allocator);
+
+    // read questions
     var i: usize = 0;
     while (i < header.number_of_questions) : (i += 1) {
-        pos += getNameLen(buffer[pos..]);
-        pos += 4; // skip question fields
+        const name_len = getNameLen(buffer[pos..]);
+        const name = try readName(allocator, buffer[0..], buffer[pos..]);
+        pos += name_len;
+
+        const q_pack = Pack.init(buffer[pos .. pos + 4], 2);
+        const r_type = q_pack.get(0);
+        const r_class = q_pack.get(1);
+        const question = Question{
+            .name = name,
+            .resource_type = @enumFromInt(r_type),
+            .resource_class = @enumFromInt(r_class),
+        };
+        pos += 4;
+
+        log.info("Reply question: {any}", .{question});
+        try questions.append(question);
     }
 
     var records = std.ArrayList(Record).init(allocator);
@@ -106,23 +144,87 @@ pub fn read_response(allocator: std.mem.Allocator, reader: anytype) ![]Record {
         const name = try readName(allocator, buffer[0..], buffer[pos..]);
         pos += name_len;
 
-        var resource = std.mem.bytesToValue(ResourceRecord, buffer[pos .. pos + @sizeOf(ResourceRecord)]);
-        std.mem.byteSwapAllFields(ResourceRecord, &resource);
-        pos += @sizeOf(ResourceRecord);
+        const q_pack = Pack.init(buffer[pos .. pos + 4], 2);
+        const r_type = q_pack.get(0);
+        const r_class = q_pack.get(1);
+        pos += 4;
+        // TODO: read ttl : u32
+        pos += 4;
+        const l_pack = Pack.init(buffer[pos .. pos + 4], 1);
+        const data_len = l_pack.get(0);
+        pos += 2;
 
-        const data = try allocator.alloc(u8, resource.length);
-        std.mem.copyForwards(u8, data, buffer[pos .. pos + data.len]);
+        const data = try allocator.alloc(u8, data_len);
+        std.mem.copyForwards(u8, data, buffer[pos .. pos + data_len]);
+        pos += data_len;
 
-        const rec = Record{
-            .allocator = allocator,
-            .resource = resource,
+        const record = Record{
+            .resource_type = @enumFromInt(r_type),
+            .resource_class = @enumFromInt(r_class),
+            .ttl = 0,
             .name = name,
             .data = data,
         };
-        try records.append(rec);
+        log.info("Reply record: {any}", .{record});
+        try records.append(record);
     }
 
-    return records.toOwnedSlice();
+    return Reply{
+        .allocator = allocator,
+        .header = header,
+        .flags = flags,
+        .questions = try questions.toOwnedSlice(),
+        .records = try records.toOwnedSlice(),
+    };
+}
+
+test "Read reply" {
+    const buffer = [_]u8{
+        1, 0, // ID
+        1, 128, // flags: u16  = 110000000
+        0, 1, //  number of questions  = 1
+        0, 1, // number of answers = 1
+        0, 0, 0, 0, //  other "number of"
+        //  question
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // question type = A, class = IN
+        // record
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // question type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        1, 2, 3, 4, // data
+    };
+
+    var stream = std.io.fixedBufferStream(&buffer);
+    const reader = stream.reader();
+
+    const reply = try read_reply(testing.allocator, reader);
+    defer reply.deinit();
+
+    try testing.expectEqual(reply.header.ID, 256);
+    try testing.expectEqual(reply.flags.recursion_desired, true);
+    try testing.expectEqual(reply.header.number_of_questions, 1);
+    try testing.expectEqual(reply.header.number_of_answers, 1);
+    try testing.expectEqual(reply.questions.len, 1);
+    try testing.expectEqual(reply.records.len, 1);
+
+    try testing.expectEqualStrings(reply.questions[0].name, "example.com");
+    try testing.expectEqual(reply.questions[0].resource_type, ResourceType.A);
+    try testing.expectEqual(reply.questions[0].resource_class, ResourceClass.IN);
+
+    try testing.expectEqualStrings(reply.records[0].name, "example.com");
+    try testing.expectEqual(reply.records[0].resource_type, ResourceType.A);
+    try testing.expectEqual(reply.records[0].resource_class, ResourceClass.IN);
+    //try testing.expectEqual(reply.records[0].ttl, 16777472); // TODO: read ttl
+    try testing.expectEqual(reply.records[0].data.len, 4);
+
+    try testing.expectEqual(reply.records[0].data[0], 1);
+    try testing.expectEqual(reply.records[0].data[1], 2);
+    try testing.expectEqual(reply.records[0].data[2], 3);
+    try testing.expectEqual(reply.records[0].data[3], 4);
 }
 
 fn getNameLen(buffer: []u8) usize {
@@ -181,7 +283,7 @@ const Flags = packed struct {
     recursion_desired: bool = false,
     recursion_available: bool = false,
     zero: u3 = 0,
-    response_code: ResponseCode = .no_error,
+    response_code: ReplyCode = .no_error,
 };
 
 const Header = packed struct {
@@ -202,7 +304,7 @@ const Opcode = enum(u4) {
     _,
 };
 
-const ResponseCode = enum(u4) {
+const ReplyCode = enum(u4) {
     no_error = 0,
     format_error = 1,
     server_fail = 2,
@@ -216,7 +318,7 @@ const ResponseCode = enum(u4) {
     _,
 };
 
-const QueryType = enum(u16) {
+const ResourceType = enum(u16) {
     A = 1,
     AAAA = 28,
     CNAME = 5,
@@ -226,37 +328,44 @@ const QueryType = enum(u16) {
     TXT = 16,
 };
 
-const QueryClass = enum(u16) {
+const ResourceClass = enum(u16) {
     IN = 1,
 };
 
-const ResourceRecord = packed struct {
-    resource_type: QueryType,
-    resource_class: QueryClass,
-    ttl: u32,
-    length: u16,
+const Question = struct {
+    name: []const u8,
+    resource_type: ResourceType,
+    resource_class: ResourceClass,
 };
 
 const Record = struct {
-    resource_type: QueryType,
-    resource_class: QueryClass,
+    resource_type: ResourceType,
+    resource_class: ResourceClass,
     ttl: u32,
-    length: u16,
     data: []const u8,
     name: []const u8,
-
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        allocator.free(self.data);
-        allocator.free(self.name);
-    }
 };
 
-pub fn free_records(allocator: std.mem.Allocator, records: []Record) void {
-    for (records) |record| {
-        record.deinit(allocator);
+const Reply = struct {
+    allocator: std.mem.Allocator,
+
+    header: Header,
+    flags: Flags,
+    questions: []Question,
+    records: []Record,
+
+    pub fn deinit(self: @This()) void {
+        for (self.questions) |q| {
+            self.allocator.free(q.name);
+        }
+        self.allocator.free(self.questions);
+        for (self.records) |r| {
+            self.allocator.free(r.name);
+            self.allocator.free(r.data);
+        }
+        self.allocator.free(self.records);
     }
-    allocator.free(records);
-}
+};
 
 fn mkid() u16 {
     var ts: os.timespec = undefined;
