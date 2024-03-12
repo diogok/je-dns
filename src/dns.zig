@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const os = std.os;
+const builtin = @import("builtin");
 
 const log = std.log.scoped(.with_dns);
 
@@ -12,10 +13,11 @@ pub fn resolve(allocator: std.mem.Allocator, name: []const u8, resource_type: Re
     const servers = try get_nameservers(allocator);
     defer allocator.free(servers);
     for (servers) |address| {
+        settimeout(sock) catch log.info("Unable to set timeout", .{});
+
         try os.connect(sock, &address.any, address.getOsSockLen());
         log.info("Connected to {any}", .{address});
 
-        // TODO: settimeout
         {
             var buffer: [512]u8 = undefined;
             var stream = std.io.fixedBufferStream(&buffer);
@@ -413,10 +415,14 @@ fn mkid() u16 {
 }
 
 pub fn get_nameservers(allocator: std.mem.Allocator) ![]std.net.Address {
-    const resolvconf = try std.fs.openFileAbsolute("/etc/resolv.conf", .{});
-    defer resolvconf.close();
-    const reader = resolvconf.reader();
-    return parse_resolvconf(allocator, reader);
+    if (builtin.os.tag == .windows) {
+        return get_windows_dns_servers(allocator);
+    } else {
+        const resolvconf = try std.fs.openFileAbsolute("/etc/resolv.conf", .{});
+        defer resolvconf.close();
+        const reader = resolvconf.reader();
+        return parse_resolvconf(allocator, reader);
+    }
 }
 
 fn parse_resolvconf(allocator: std.mem.Allocator, reader: anytype) ![]std.net.Address {
@@ -434,7 +440,7 @@ fn parse_resolvconf(allocator: std.mem.Allocator, reader: anytype) ![]std.net.Ad
         }
     }
 
-    return try addresses.toOwnedSlice();
+    return addresses.toOwnedSlice();
 }
 
 test "nameservers" {
@@ -460,3 +466,70 @@ test "nameservers" {
     try testing.expect(addresses[0].eql(ip4));
     try testing.expect(addresses[1].eql(ip6));
 }
+
+fn get_windows_dns_servers(allocator: std.mem.Allocator) ![]std.net.Address {
+    var addresses = std.ArrayList(std.net.Address).init(allocator);
+
+    var info = std.mem.zeroInit(PFIXED_INFO, .{});
+    var buf_len: u32 = @intCast(@sizeOf(PFIXED_INFO));
+    _ = GetNetworkParams(&info, &buf_len);
+
+    var maybe_server = info.CurrentDnsServer;
+    while (maybe_server) |server| {
+        var len: usize = 0;
+        while (server.IpAddress.String[len] != 0) : (len += 1) {}
+        const addr = server.IpAddress.String[0..len];
+        const address = std.net.Address.parseIp(addr, 53) catch break;
+        try addresses.append(address);
+        maybe_server = server.Next;
+    }
+
+    return addresses.toOwnedSlice();
+}
+
+fn settimeout(fd: std.os.socket_t) !void {
+    const micros: i32 = 1000000;
+    if (micros > 0) {
+        var timeout: std.os.timeval = undefined;
+        timeout.tv_sec = @as(c_long, @intCast(@divTrunc(micros, 1000000)));
+        timeout.tv_usec = @as(c_long, @intCast(@mod(micros, 1000000)));
+        try std.os.setsockopt(
+            fd,
+            std.os.SOL.SOCKET,
+            std.os.SO.RCVTIMEO,
+            std.mem.toBytes(timeout)[0..],
+        );
+        try std.os.setsockopt(
+            fd,
+            std.os.SOL.SOCKET,
+            std.os.SO.SNDTIMEO,
+            std.mem.toBytes(timeout)[0..],
+        );
+    }
+}
+
+// Windows APIs
+extern "iphlpapi" fn GetNetworkParams(pFixedInfo: ?*PFIXED_INFO, pOutBufLen: ?*u32) callconv(.C) u32;
+
+const PFIXED_INFO = extern struct {
+    HostName: [132]u8,
+    DomainName: [132]u8,
+    CurrentDnsServer: ?*IP_ADDR_STRING,
+    DnsServerList: IP_ADDR_STRING,
+    NodeType: u32,
+    ScopeId: [260]u8,
+    EnableRouting: u32,
+    EnableProxy: u32,
+    EnableDns: u32,
+};
+
+const IP_ADDR_STRING = extern struct {
+    Next: ?*IP_ADDR_STRING,
+    IpAddress: IP_ADDRESS_STRING,
+    IpMask: IP_ADDRESS_STRING,
+    Context: u32,
+};
+
+const IP_ADDRESS_STRING = extern struct {
+    String: [16]u8,
+};
