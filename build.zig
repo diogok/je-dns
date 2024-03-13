@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns.zig" } });
+    const mdns = b.addModule("mdns", .{ .root_source_file = .{ .path = "src/mdns.zig" } });
+
     {
         const exe = b.addExecutable(.{
             .name = "demo",
@@ -12,6 +15,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = .{ .path = "src/main.zig" },
             .link_libc = target.result.os.tag == .windows,
         });
+        exe.root_module.addImport("dns", dns);
+        exe.root_module.addImport("mdns", mdns);
 
         b.installArtifact(exe);
 

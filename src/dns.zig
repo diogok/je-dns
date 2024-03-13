@@ -5,14 +5,21 @@ const builtin = @import("builtin");
 
 const log = std.log.scoped(.with_dns);
 
-pub fn resolve(allocator: std.mem.Allocator, name: []const u8, resource_type: ResourceType) !Reply {
-    const sock = try os.socket(os.AF.INET, os.SOCK.DGRAM | os.SOCK.CLOEXEC, 0);
-    defer os.close(sock);
+pub const ResolveOptions = struct {};
 
-    // TODO: enabe override of dns server
+pub fn query(allocator: std.mem.Allocator, name: []const u8, resource_type: ResourceType, options: ResolveOptions) !Reply {
+    return queryDNS(allocator, name, resource_type, options);
+}
+
+pub fn queryDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: ResourceType, _: ResolveOptions) !Reply {
+    // TODO: enable override of dns server, timeout, other options
     const servers = try get_nameservers(allocator);
     defer allocator.free(servers);
     for (servers) |address| {
+        log.info("Trying address: {any}", .{address});
+        const sock = try os.socket(address.any.family, os.SOCK.DGRAM | os.SOCK.CLOEXEC, 0);
+        defer os.close(sock);
+
         settimeout(sock) catch log.info("Unable to set timeout", .{});
 
         try os.connect(sock, &address.any, address.getOsSockLen());
@@ -413,16 +420,25 @@ fn mkid() u16 {
     var rnd = std.Random.DefaultPrng.init(0);
     return rnd.random().int(u16);
 }
-
 pub fn get_nameservers(allocator: std.mem.Allocator) ![]std.net.Address {
     if (builtin.os.tag == .windows) {
-        return get_windows_dns_servers(allocator);
+        return try get_windows_dns_servers(allocator);
     } else {
         const resolvconf = try std.fs.openFileAbsolute("/etc/resolv.conf", .{});
         defer resolvconf.close();
         const reader = resolvconf.reader();
-        return parse_resolvconf(allocator, reader);
+        return try parse_resolvconf(allocator, reader);
     }
+}
+
+fn mdns_nameservers(allocator: std.mem.Allocator) ![]std.net.Address {
+    const ips = [_][]const u8{ "ff02::fb", "224.0.0.251" };
+    var addresses = std.ArrayList(std.net.Address).init(allocator);
+    for (ips) |ip| {
+        const address = std.net.Address.parseIp(ip, 5353) catch continue;
+        try addresses.append(address);
+    }
+    return addresses.toOwnedSlice();
 }
 
 fn parse_resolvconf(allocator: std.mem.Allocator, reader: anytype) ![]std.net.Address {
