@@ -4,8 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns.zig" } });
-    const mdns = b.addModule("mdns", .{ .root_source_file = .{ .path = "src/mdns.zig" } });
+    const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/core.zig" } });
 
     {
         const exe = b.addExecutable(.{
@@ -14,9 +13,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .root_source_file = .{ .path = "src/main.zig" },
             .link_libc = target.result.os.tag == .windows,
+            //.link_libc = true,
         });
         exe.root_module.addImport("dns", dns);
-        exe.root_module.addImport("mdns", mdns);
 
         b.installArtifact(exe);
 
@@ -29,7 +28,7 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{
             .target = target,
             .optimize = optimize,
-            .root_source_file = .{ .path = "src/dns.zig" },
+            .root_source_file = .{ .path = "src/dns/core.zig" },
         });
 
         const run_tests = b.addRunArtifact(tests);

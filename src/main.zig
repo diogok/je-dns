@@ -2,7 +2,6 @@ const std = @import("std");
 const os = std.os;
 
 const dns = @import("dns");
-const mdns = @import("mdns");
 
 const log = std.log.scoped(.with_me);
 
@@ -12,13 +11,13 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     {
-        const reply = try dns.query(allocator, "diogok.net", .A, .{});
+        const reply = try dns.query(allocator, .{ .name = "diogok.net", .resource_type = .A }, .{});
         defer reply.deinit();
         log.info("Reply: {any}", .{reply.records[0]});
     }
 
     {
-        const reply = try mdns.query(allocator, "diogo-dell.local", .A, .{});
+        const reply = try dns.query(allocator, .{ .name = "diogo-dell.local", .resource_type = .A }, .{});
         defer reply.deinit();
         log.info("Reply: {any}", .{reply.records[0]});
     }
