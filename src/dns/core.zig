@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const io = @import("io.zig");
 const data = @import("data.zig");
 const dns = @import("dns.zig");
 const mdns = @import("mdns.zig");
@@ -20,4 +19,5 @@ test "all" {
     _ = @import("data.zig");
     _ = @import("dns.zig");
     _ = @import("mdns.zig");
+    _ = @import("udp.zig");
 }

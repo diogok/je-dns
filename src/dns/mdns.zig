@@ -15,31 +15,25 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: dns.Optio
         const group_address = addresses[1];
         log.info("Trying address: Bind: {any}, MC: {any}", .{ bind_address, group_address });
 
-        const sock_in = try std.os.socket(bind_address.any.family, std.os.SOCK.DGRAM, 0);
-        defer std.os.close(sock_in);
-
-        var socket_in = udp.Socket.init(allocator, sock_in);
+        var socket_in = try udp.Socket.init(allocator, bind_address);
         defer socket_in.deinit();
 
         {
             //try setTimeout(sock_in);
-            try udp.enableReuse(sock_in);
-            try std.os.bind(sock_in, &bind_address.any, bind_address.getOsSockLen());
-            try udp.addMembership(sock_in, bind_address);
+            try udp.enableReuse(socket_in.handle);
+            try socket_in.bind();
+            try udp.addMembership(socket_in.handle, bind_address);
         }
 
         var id: u16 = 0;
 
         {
-            const sock_out = try std.os.socket(group_address.any.family, std.os.SOCK.DGRAM, 0);
-            defer std.os.close(sock_out);
-
-            var socket_out = udp.Socket.init(allocator, sock_out);
+            var socket_out = try udp.Socket.init(allocator, group_address);
             defer socket_out.deinit();
 
-            try udp.setTimeout(sock_out);
+            try udp.setTimeout(socket_out.handle);
+            try socket_out.connect();
             //try setupMulticast(sock_out, group_address);
-            try std.os.connect(sock_out, &group_address.any, group_address.getOsSockLen());
 
             id = try io.writeQuery(socket_out.writer(), question);
             try socket_out.flush();

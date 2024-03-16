@@ -17,15 +17,13 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: Options) 
 
     for (servers) |address| {
         log.info("Trying address: {any}", .{address});
-        const sock = try std.os.socket(address.any.family, std.os.SOCK.DGRAM | std.os.SOCK.CLOEXEC, 0);
-        defer std.os.close(sock);
 
-        try udp.setTimeout(sock);
-        try std.os.connect(sock, &address.any, address.getOsSockLen());
-        log.info("Connected to {any}", .{address});
-
-        var socket = udp.Socket.init(allocator, sock);
+        var socket = try udp.Socket.init(allocator, address);
         defer socket.deinit();
+
+        try udp.setTimeout(socket.handle);
+        try socket.connect();
+        log.info("Connected to {any}", .{address});
 
         _ = try io.writeQuery(socket.writer(), question);
         try socket.flush();

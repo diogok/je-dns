@@ -6,18 +6,27 @@ const ByteWriter = ByteArrayList.Writer;
 
 pub const Socket = struct {
     allocator: std.mem.Allocator,
+
+    address: std.net.Address,
+    handle: std.os.socket_t,
+
     write_data: ByteArrayList,
     read_data: ByteArrayList,
-    socket: std.os.socket_t,
 
     read_pos: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, socket: std.os.socket_t) @This() {
+    pub fn init(allocator: std.mem.Allocator, address: std.net.Address) !@This() {
+        const handle = try std.os.socket(address.any.family, std.os.SOCK.DGRAM | std.os.SOCK.CLOEXEC, 0);
+
         const write_data = ByteArrayList.init(allocator);
         const read_data = ByteArrayList.init(allocator);
+
         return @This(){
             .allocator = allocator,
-            .socket = socket,
+
+            .address = address,
+            .handle = handle,
+
             .write_data = write_data,
             .read_data = read_data,
         };
@@ -25,12 +34,22 @@ pub const Socket = struct {
 
     pub fn deinit(self: *@This()) void {
         self.write_data.deinit();
+        self.read_data.deinit();
+        std.os.close(self.handle);
+    }
+
+    pub fn bind(self: *@This()) !void {
+        try std.os.bind(self.handle, &self.address.any, self.address.getOsSockLen());
+    }
+
+    pub fn connect(self: *@This()) !void {
+        try std.os.connect(self.handle, &self.address.any, self.address.getOsSockLen());
     }
 
     pub fn flush(self: *@This()) !void {
         const bytes = try self.write_data.toOwnedSlice();
         defer self.allocator.free(bytes);
-        _ = try std.os.send(self.socket, bytes[0..28], 0);
+        _ = try std.os.send(self.handle, bytes[0..28], 0);
     }
 
     pub fn writer(self: *@This()) ByteWriter {
@@ -46,7 +65,7 @@ pub const Socket = struct {
 
     pub fn read(context: *const anyopaque, buffer: []u8) anyerror!usize {
         const self: *@This() = @constCast(@ptrCast(@alignCast(context)));
-        return try std.os.recv(self.socket, buffer, 0);
+        return try std.os.recv(self.handle, buffer, 0);
     }
 };
 
