@@ -25,7 +25,7 @@ pub fn writeQuery(writer: anytype, question: data.Question) !u16 {
         .records = &[_]data.Record{},
     };
 
-    log.info("Query: {any}", .{message});
+    logMessage(message);
     try writeMessage(writer, message);
 
     return header.ID;
@@ -111,7 +111,6 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
     try full_message.appendSlice(header_buffer[0..]);
 
     const header = readHeader(header_buffer[0..]);
-    log.info("Message header: {any}", .{header});
 
     // read questions
     var questions = std.ArrayList(data.Question).init(allocator);
@@ -183,12 +182,15 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
         try records.append(record);
     }
 
-    return data.Message{
+    const message = data.Message{
         .allocator = allocator,
         .header = header,
         .questions = try questions.toOwnedSlice(),
         .records = try records.toOwnedSlice(),
     };
+
+    logMessage(message);
+    return message;
 }
 
 fn readHeader(buffer: []u8) data.Header {
@@ -338,4 +340,40 @@ fn mkid() u16 {
         break :blk seed;
     });
     return rnd.random().int(u16);
+}
+
+pub fn logMessage(msg: data.Message) void {
+    log.info("┌──────", .{});
+    log.info("│ ID: {d}", .{msg.header.ID});
+
+    log.info("│ Type: {any}", .{msg.header.flags.query_or_reply});
+    log.info("│ Opcode: {any}", .{msg.header.flags.opcode});
+    log.info("│ Authoritative: {any}", .{msg.header.flags.authoritative_answer});
+    log.info("│ Truncation: {any}", .{msg.header.flags.truncation});
+    log.info("│ Recursion desired: {any}", .{msg.header.flags.recursion_desired});
+    log.info("│ Recursion available: {any}", .{msg.header.flags.recursion_available});
+    log.info("│ Response code: {any}", .{msg.header.flags.response_code});
+
+    log.info("│ Questions: {d}", .{msg.header.number_of_questions});
+    log.info("│ Answers: {d}", .{msg.header.number_of_answers});
+    log.info("│ Authority records: {d}", .{msg.header.number_of_authority_resource_records});
+    log.info("│ Additional records: {d}", .{msg.header.number_of_additional_resource_records});
+
+    for (msg.questions, 0..) |q, i| {
+        log.info("│ => Question {d}:", .{i});
+        log.info("│ ==> Name: {s}", .{q.name});
+        log.info("│ ==> Resource type: {any}", .{q.resource_type});
+        log.info("│ ==> Resource class: {any}", .{q.resource_class});
+    }
+
+    for (msg.records, 0..) |r, i| {
+        log.info("│ => Record {d}:", .{i});
+        log.info("│ ==> Name: {s}", .{r.name});
+        log.info("│ ==> Resource type: {any}", .{r.resource_type});
+        log.info("│ ==> Resource class: {any}", .{r.resource_class});
+        log.info("│ ==> TTL: {d}", .{r.ttl});
+        log.info("│ ==> Data: {b}", .{r.data});
+    }
+
+    log.info("└──────", .{});
 }

@@ -51,10 +51,12 @@ pub const ResourceType = enum(u16) {
     PTR = 12,
     SRV = 33,
     TXT = 16,
+    _,
 };
 
 pub const ResourceClass = enum(u16) {
     IN = 1,
+    _,
 };
 
 pub const Question = struct {

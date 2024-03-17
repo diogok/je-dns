@@ -17,7 +17,7 @@ pub fn main() !void {
     }
 
     {
-        const reply = try dns.query(allocator, .{ .name = "diogo-dell.local", .resource_type = .A }, .{});
+        const reply = try dns.query(allocator, .{ .name = "mercari.local", .resource_type = .A }, .{});
         defer reply.deinit();
         log.info("Reply: {any}", .{reply.records[0]});
     }

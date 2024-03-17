@@ -12,7 +12,7 @@ pub const Socket = struct {
     len: usize = 0,
 
     pub fn init(address: std.net.Address) !@This() {
-        const handle = try std.os.socket(address.any.family, std.os.SOCK.DGRAM | std.os.SOCK.CLOEXEC, 0);
+        const handle = try std.os.socket(address.any.family, std.os.SOCK.DGRAM, 0);
         return @This(){
             .address = address,
             .handle = handle,
@@ -32,6 +32,7 @@ pub const Socket = struct {
     }
 
     pub fn reset(self: *@This()) void {
+        self.buffer = std.mem.zeroes(@TypeOf(self.buffer));
         self.pos = 0;
         self.len = 0;
     }
@@ -39,9 +40,14 @@ pub const Socket = struct {
     pub fn send(self: *@This()) !void {
         const bytes = self.buffer[0..self.len];
         _ = try std.os.send(self.handle, bytes, 0);
-        self.len = 0;
+        self.reset();
     }
 
+    pub fn sendTo(self: *@This(), address: std.net.Address) !void {
+        const bytes = self.buffer[0..self.len];
+        _ = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
+        self.reset();
+    }
     pub fn writer(self: *@This()) std.io.AnyWriter {
         return .{
             .context = self,
@@ -73,8 +79,8 @@ pub const Socket = struct {
     }
 
     pub fn receive(self: *@This()) !void {
+        self.reset();
         const len = try std.os.recv(self.handle, &self.buffer, 0);
-        self.pos = 0;
         self.len = len;
     }
 
@@ -176,12 +182,13 @@ pub fn setupMulticast(sock: std.os.socket_t, address: std.net.Address) !void {
     switch (address.any.family) {
         std.os.AF.INET => {
             //const any = std.net.Address.parseIp4("224.0.0.251", 5353) catch unreachable;
-            //try std.os.setsockopt(
-            //    sock,
-            //    std.os.SOL.IP,
-            //    std.os.system.IP.MULTICAST_IF,
-            //    std.mem.asBytes(&any.in.sa.addr),
-            //);
+            const any = std.net.Address.parseIp4("0.0.0.0", 5353) catch unreachable;
+            try std.os.setsockopt(
+                sock,
+                std.os.SOL.IP,
+                std.os.system.IP.MULTICAST_IF,
+                std.mem.asBytes(&any.in.sa.addr),
+            );
             try std.os.setsockopt(
                 sock,
                 std.os.SOL.IP,
