@@ -18,7 +18,7 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: Options) 
     for (servers) |address| {
         log.info("Trying address: {any}", .{address});
 
-        var socket = try udp.Socket.init(allocator, address);
+        var socket = try udp.Socket.init(address);
         defer socket.deinit();
 
         try udp.setTimeout(socket.handle);

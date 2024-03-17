@@ -15,7 +15,7 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: dns.Optio
         const group_address = addresses[1];
         log.info("Trying address: Bind: {any}, MC: {any}", .{ bind_address, group_address });
 
-        var socket_in = try udp.Socket.init(allocator, bind_address);
+        var socket_in = try udp.Socket.init(bind_address);
         defer socket_in.deinit();
 
         {
@@ -28,7 +28,7 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: dns.Optio
         var id: u16 = 0;
 
         {
-            var socket_out = try udp.Socket.init(allocator, group_address);
+            var socket_out = try udp.Socket.init(group_address);
             defer socket_out.deinit();
 
             try udp.setTimeout(socket_out.handle);
