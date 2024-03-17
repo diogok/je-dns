@@ -103,42 +103,34 @@ const Pack2 = std.PackedIntSliceEndian(u32, .big);
 
 pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message {
     // read all of the request, because we might need the all bytes for pointer/compressed labels
-    var pos: usize = 0;
-    var buffer: [512]u8 = undefined;
-    _ = try reader.read(&buffer);
+    var full_message = std.ArrayList(u8).init(allocator);
+    defer full_message.deinit();
 
-    const header_pack = Pack.init(buffer[0..12], 6); // To read the u16 as big endian
+    var header_buffer: [12]u8 = undefined;
+    _ = try reader.read(&header_buffer);
+    try full_message.appendSlice(header_buffer[0..]);
 
-    var flag_bits = header_pack.get(1);
-    if (builtin.cpu.arch.endian() == .little) {
-        flag_bits = @bitReverse(flag_bits);
-    }
-    const flags: data.Flags = @bitCast(flag_bits);
-
-    const header = data.Header{
-        .ID = header_pack.get(0),
-        .flags = flags,
-        .number_of_questions = header_pack.get(2),
-        .number_of_answers = header_pack.get(3),
-        .number_of_authority_resource_records = header_pack.get(4),
-        .number_of_additional_resource_records = header_pack.get(5),
-    };
-    pos += 12;
+    const header = readHeader(header_buffer[0..]);
     log.info("Message header: {any}", .{header});
 
     // read questions
     var questions = std.ArrayList(data.Question).init(allocator);
+    errdefer {
+        for (questions.items) |q| {
+            allocator.free(q.name);
+        }
+        questions.deinit();
+    }
     var i: usize = 0;
     while (i < header.number_of_questions) : (i += 1) {
-        if (pos >= buffer.len) break;
+        const name = try readName(allocator, &full_message, reader);
+        errdefer allocator.free(name);
 
-        const name_len = getNameLen(buffer[pos..]);
-        if (name_len == 0) break;
+        var q_buffer: [4]u8 = undefined;
+        _ = try reader.read(&q_buffer);
+        try full_message.appendSlice(q_buffer[0..]);
 
-        const name = try readName(allocator, buffer[0..], buffer[pos..]);
-        pos += name_len;
-
-        const q_pack = Pack.init(buffer[pos .. pos + 4], 2);
+        const q_pack = Pack.init(&q_buffer, 2);
         const r_type = q_pack.get(0);
         const r_class = q_pack.get(1);
         const question = data.Question{
@@ -146,36 +138,40 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
             .resource_type = @enumFromInt(r_type),
             .resource_class = @enumFromInt(r_class),
         };
-        pos += 4;
 
         try questions.append(question);
     }
 
     var records = std.ArrayList(data.Record).init(allocator);
+    errdefer {
+        for (records.items) |r| {
+            allocator.free(r.name);
+            allocator.free(r.data);
+        }
+        records.deinit();
+    }
     i = 0;
     while (i < header.number_of_answers) : (i += 1) {
-        if (pos >= buffer.len) break;
+        const name = try readName(allocator, &full_message, reader);
+        errdefer allocator.free(name);
 
-        const name_len = getNameLen(buffer[pos..]);
-        const name = try readName(allocator, buffer[0..], buffer[pos .. pos + name_len]);
-        pos += name_len;
+        var r_buffer: [10]u8 = undefined;
+        _ = try reader.read(&r_buffer);
+        try full_message.appendSlice(r_buffer[0..]);
 
-        const q_pack = Pack.init(buffer[pos .. pos + 4], 2);
+        const q_pack = Pack.init(r_buffer[0..4], 2);
         const r_type = q_pack.get(0);
         const r_class = q_pack.get(1);
-        pos += 4;
 
-        const ttl_pack = Pack2.init(buffer[pos .. pos + 4], 1);
+        const ttl_pack = Pack2.init(r_buffer[4..8], 1);
         const ttl = ttl_pack.get(0);
-        pos += 4;
 
-        const l_pack = Pack.init(buffer[pos .. pos + 4], 1);
+        const l_pack = Pack.init(r_buffer[8..10], 1);
         const data_len = l_pack.get(0);
-        pos += 2;
 
         const extra = try allocator.alloc(u8, data_len);
-        std.mem.copyForwards(u8, extra, buffer[pos .. pos + data_len]);
-        pos += data_len;
+        errdefer allocator.free(extra);
+        _ = try reader.read(extra);
 
         const record = data.Record{
             .resource_type = @enumFromInt(r_type),
@@ -192,15 +188,34 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
         .header = header,
         .questions = try questions.toOwnedSlice(),
         .records = try records.toOwnedSlice(),
-        .size = pos,
     };
+}
+
+fn readHeader(buffer: []u8) data.Header {
+    const header_pack = Pack.init(buffer, 6); // To read the u16 as big endian
+
+    var flag_bits = header_pack.get(1);
+    if (builtin.cpu.arch.endian() == .little) {
+        flag_bits = @bitReverse(flag_bits);
+    }
+    const flags: data.Flags = @bitCast(flag_bits);
+
+    const header = data.Header{
+        .ID = header_pack.get(0),
+        .flags = flags,
+        .number_of_questions = header_pack.get(2),
+        .number_of_answers = header_pack.get(3),
+        .number_of_authority_resource_records = header_pack.get(4),
+        .number_of_additional_resource_records = header_pack.get(5),
+    };
+
+    return header;
 }
 
 test "Read reply" {
     const buffer = [_]u8{
         1, 0, // ID
-        //129, 128, // flags: u16  = 10100001 10000000
-        161, 128, // flags: u16  = 10100001 10000000
+        0b10100001, 0b10000000, // flags
         0, 1, //  number of questions  = 1
         0, 2, // number of answers = 1
         0, 0, 0, 0, //  other "number of"
@@ -210,18 +225,19 @@ test "Read reply" {
         0, 1, 0, 1, // question type = A, class = IN
         // record
         7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
-        3, 'c', 'o', 'm', 0, // last label of name
+        0b11000000, 20, // last label of name is a pointer
         0, 1, 0, 1, // question type = A, class = IN
         1, 0, 1, 0, // ttl = 16777472
         0, 4, // length
         1, 2, 3, 4, // data
         // record
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
-        3, 'c', 'o', 'm', 0, // last label of name
+        3, 'w', 'w', 'w', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
         0, 1, 0, 1, // question type = A, class = IN
         1, 0, 1, 0, // ttl = 16777472
         0, 4, // length
-        1, 2, 3, 4, // data
+        4, 3, 2, 1, // data
     };
 
     var stream = std.io.fixedBufferStream(&buffer);
@@ -231,10 +247,10 @@ test "Read reply" {
     defer reply.deinit();
 
     try testing.expectEqual(reply.header.ID, 256);
-    //try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
-    //try testing.expectEqual(reply.header.flags.recursion_desired, true);
-    //try testing.expectEqual(reply.header.flags.recursion_available, true);
-    //try testing.expectEqual(reply.header.flags.response_code, .no_error);
+    try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
+    try testing.expectEqual(reply.header.flags.recursion_desired, true);
+    try testing.expectEqual(reply.header.flags.recursion_available, true);
+    try testing.expectEqual(reply.header.flags.response_code, .no_error);
     try testing.expectEqual(reply.header.number_of_questions, 1);
     try testing.expectEqual(reply.header.number_of_answers, 2);
     try testing.expectEqual(reply.questions.len, 1);
@@ -254,56 +270,61 @@ test "Read reply" {
     try testing.expectEqual(reply.records[0].data[1], 2);
     try testing.expectEqual(reply.records[0].data[2], 3);
     try testing.expectEqual(reply.records[0].data[3], 4);
+
+    try testing.expectEqualStrings(reply.records[1].name, "www.example.com");
+    try testing.expectEqual(reply.records[1].data[0], 4);
+    try testing.expectEqual(reply.records[1].data[1], 3);
+    try testing.expectEqual(reply.records[1].data[2], 2);
+    try testing.expectEqual(reply.records[1].data[3], 1);
 }
 
-fn getNameLen(buffer: []u8) usize {
-    var skip: usize = 1;
-    var len = buffer[0];
-    while (len > 0) : (skip += 1) {
-        if (len == 192) {
-            // this is a pointer to another memory region
-            // used for compressed labels
-            return skip + 1;
-        } else {
-            skip += len;
-            if (skip >= buffer.len) return 0;
-            len = buffer[skip];
-        }
-    }
-    return skip;
-}
+fn readName(allocator: std.mem.Allocator, full_buffer: *std.ArrayList(u8), reader: anytype) ![]const u8 {
+    var name_buffer = std.ArrayList(u8).init(allocator);
+    defer name_buffer.deinit();
 
-test "Get name len" {}
-
-test "Get name len with pointer" {}
-
-fn readName(allocator: std.mem.Allocator, full_buffer: []u8, buffer: []u8) ![]const u8 {
-    var arr = std.ArrayList(u8).init(allocator);
-
-    var pos: usize = 0;
-
-    var len = buffer[0];
-    pos += 1;
+    var len = try reader.readByte();
+    try full_buffer.append(len);
     while (len > 0) {
-        if (len == 192) {
-            const ptr = buffer[pos];
-            const ptr_name = try readName(allocator, full_buffer, full_buffer[ptr..]);
-            defer allocator.free(ptr_name);
-            try arr.appendSlice(ptr_name);
+        if (len & 0b11000000 == 0b11000000) {
+            //const ptr0 = len;
+            const ptr1 = try reader.readByte();
+            try full_buffer.append(ptr1);
+
+            const start: usize = @intCast(ptr1);
+            //const max = @min(full_buffer.items.len, start + 512);
+            //const re_buffer = full_buffer.items[start..max];
+
+            var fake = std.ArrayList(u8).init(allocator);
+            defer fake.deinit();
+            try fake.appendSlice(full_buffer.items);
+
+            var stream = std.io.fixedBufferStream(full_buffer.items);
+            const re_reader = stream.reader();
+            try re_reader.skipBytes(start, .{});
+
+            const label = try readName(allocator, &fake, re_reader);
+            defer allocator.free(label);
+
+            try name_buffer.appendSlice(label);
+
             break;
-        }
+        } else {
+            const label = try allocator.alloc(u8, len);
+            defer allocator.free(label);
+            _ = try reader.read(label);
 
-        try arr.appendSlice(buffer[pos .. pos + len]);
-        pos += len;
+            try full_buffer.appendSlice(label);
+            try name_buffer.appendSlice(label);
 
-        len = buffer[pos];
-        pos += 1;
-        if (len > 0) {
-            try arr.append('.');
+            len = try reader.readByte();
+            try full_buffer.append(len);
+            if (len > 0) {
+                try name_buffer.append('.');
+            }
         }
     }
 
-    return arr.toOwnedSlice();
+    return try name_buffer.toOwnedSlice();
 }
 
 test "Read name" {}

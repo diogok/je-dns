@@ -26,7 +26,9 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: Options) 
         log.info("Connected to {any}", .{address});
 
         _ = try io.writeQuery(socket.writer(), question);
-        try socket.flush();
+
+        try socket.send();
+        try socket.receive();
 
         const reply = try io.readMessage(allocator, socket.reader());
         if (reply.records.len > 0) {

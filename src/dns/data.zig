@@ -73,7 +73,6 @@ pub const Record = struct {
 
 pub const Message = struct {
     allocator: ?std.mem.Allocator = null,
-    size: usize = 0,
 
     header: Header,
     questions: []const Question,

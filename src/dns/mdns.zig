@@ -36,9 +36,10 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, _: dns.Optio
             //try setupMulticast(sock_out, group_address);
 
             id = try io.writeQuery(socket_out.writer(), question);
-            try socket_out.flush();
+            try socket_out.send();
         }
 
+        try socket_in.receive();
         while (true) {
             const reply = try io.readMessage(allocator, socket_in.reader());
             if (reply.header.ID != id) {

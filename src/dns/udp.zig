@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const testing = std.testing;
+
 const ByteArrayList = std.ArrayList(u8);
 const ByteWriter = ByteArrayList.Writer;
 
@@ -10,16 +12,16 @@ pub const Socket = struct {
     address: std.net.Address,
     handle: std.os.socket_t,
 
-    write_data: ByteArrayList,
-    read_data: ByteArrayList,
+    write_buffer: ByteArrayList,
 
+    read_buffer: ByteArrayList,
     read_pos: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, address: std.net.Address) !@This() {
         const handle = try std.os.socket(address.any.family, std.os.SOCK.DGRAM | std.os.SOCK.CLOEXEC, 0);
 
-        const write_data = ByteArrayList.init(allocator);
-        const read_data = ByteArrayList.init(allocator);
+        const write_buffer = ByteArrayList.init(allocator);
+        const read_buffer = ByteArrayList.init(allocator);
 
         return @This(){
             .allocator = allocator,
@@ -27,14 +29,14 @@ pub const Socket = struct {
             .address = address,
             .handle = handle,
 
-            .write_data = write_data,
-            .read_data = read_data,
+            .write_buffer = write_buffer,
+            .read_buffer = read_buffer,
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        self.write_data.deinit();
-        self.read_data.deinit();
+        self.write_buffer.deinit();
+        self.read_buffer.deinit();
         std.os.close(self.handle);
     }
 
@@ -46,14 +48,14 @@ pub const Socket = struct {
         try std.os.connect(self.handle, &self.address.any, self.address.getOsSockLen());
     }
 
-    pub fn flush(self: *@This()) !void {
-        const bytes = try self.write_data.toOwnedSlice();
+    pub fn send(self: *@This()) !void {
+        const bytes = try self.write_buffer.toOwnedSlice();
         defer self.allocator.free(bytes);
         _ = try std.os.send(self.handle, bytes[0..28], 0);
     }
 
     pub fn writer(self: *@This()) ByteWriter {
-        return self.write_data.writer();
+        return self.write_buffer.writer();
     }
 
     pub fn reader(self: *@This()) std.io.AnyReader {
@@ -63,11 +65,60 @@ pub const Socket = struct {
         };
     }
 
+    pub fn receive(self: *@This()) !void {
+        var buffer: [512]u8 = undefined;
+        const len = try std.os.recv(self.handle, &buffer, 0);
+        try self.read_buffer.appendSlice(buffer[0..len]);
+    }
+
     pub fn read(context: *const anyopaque, buffer: []u8) anyerror!usize {
         const self: *@This() = @constCast(@ptrCast(@alignCast(context)));
-        return try std.os.recv(self.handle, buffer, 0);
+
+        const self_buff = self.read_buffer.items;
+        const self_len = self_buff.len;
+        const read_pos = self.read_pos;
+        if (read_pos == self_len) {
+            return 0;
+        }
+
+        const len = @min(buffer.len, self_len - read_pos);
+        const end = @min(len, self_len) + read_pos;
+        std.mem.copyForwards(u8, buffer, self_buff[read_pos..end]);
+
+        self.read_pos += len;
+
+        return len;
     }
 };
+
+test "Socket reader" {
+    const addr = try std.net.Address.parseIp("127.0.0.1",5353);
+    var socket = try Socket.init(testing.allocator, addr);
+    defer socket.deinit();
+
+    const data = [_]u8{1,2,3,4,5,6,7,8,9,10,11,12};
+    try socket.read_buffer.appendSlice(&data);
+
+    const reader = socket.reader();
+
+    const d0 = [_]u8{1,2,3,4,5};
+    const d1 = [_]u8{6,7,8,9,10};
+    const d2 = [_]u8{11,12};
+
+    var buffer:[5]u8 = undefined;
+    var len = try reader.read(&buffer);
+    try testing.expectEqualSlices(u8,&d0,buffer[0..len]);
+
+    len = try reader.read(&buffer);
+    try testing.expectEqualSlices(u8,&d1,buffer[0..len]);
+
+    len = try reader.read(&buffer);
+    try testing.expectEqualSlices(u8,&d2,buffer[0..len]);
+
+    len = try reader.read(&buffer);
+    try testing.expectEqual(len,0);
+
+}
 
 pub fn setTimeout(fd: std.os.socket_t) !void {
     const micros: i32 = 1000000;
