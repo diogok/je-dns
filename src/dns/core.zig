@@ -24,6 +24,12 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
     const servers = try nsservers.getDNSServers(allocator);
     defer allocator.free(servers);
 
+    var message = data.Message.initEmpty();
+    message.questions = &[_]data.Question{question};
+    message.header.flags.recursion_available = true;
+    message.header.flags.recursion_desired = true;
+    message.header.number_of_questions = 1;
+
     for (servers) |address| {
         log.info("Trying address: {any}", .{address});
 
@@ -34,7 +40,7 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
         try socket.connect();
         log.info("Connected to {any}", .{address});
 
-        _ = try io.writeQuery(socket.writer(), question);
+        try io.writeMessage(socket.writer(), message);
 
         try socket.send();
         try socket.receive();
@@ -53,6 +59,10 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
 fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !data.Message {
     const servers = nsservers.getMDNSServers();
 
+    var message = data.Message.initEmpty();
+    message.questions = &[_]data.Question{question};
+    message.header.number_of_questions = 1;
+
     for (servers) |addresses| {
         const bind_address = addresses[0];
         const group_address = addresses[1];
@@ -69,7 +79,7 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
         try udp.addMembership(socket.handle, group_address);
         try udp.setupMulticast(socket.handle, group_address);
 
-        _ = try io.writeQuery(socket.writer(), question);
+        try io.writeMessage(socket.writer(), message);
         try socket.sendTo();
 
         var i: u8 = 0;

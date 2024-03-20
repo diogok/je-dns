@@ -1,8 +1,8 @@
 const std = @import("std");
 
 pub const Header = packed struct {
-    ID: u16,
-    flags: Flags,
+    ID: u16 = 0,
+    flags: Flags = Flags{},
     number_of_questions: u16 = 0,
     number_of_answers: u16 = 0,
     number_of_authority_resource_records: u16 = 0,
@@ -80,6 +80,14 @@ pub const Message = struct {
     questions: []const Question,
     records: []const Record,
 
+    pub fn initEmpty() @This() {
+        return Message{
+            .header = Header{},
+            .questions = &[_]Question{},
+            .records = &[_]Record{},
+        };
+    }
+
     pub fn deinit(self: @This()) void {
         if (self.allocator) |allocator| {
             for (self.questions) |q| {
@@ -94,3 +102,12 @@ pub const Message = struct {
         }
     }
 };
+
+pub fn mkid() u16 {
+    var rnd = std.Random.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        std.os.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        break :blk seed;
+    });
+    return rnd.random().int(u16);
+}

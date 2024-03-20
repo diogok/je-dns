@@ -7,31 +7,9 @@ const data = @import("data.zig");
 
 const log = std.log.scoped(.with_dns);
 
-pub fn writeQuery(writer: anytype, question: data.Question) !u16 {
-    const flags = data.Flags{
-        .query_or_reply = .query,
-        .opcode = .query,
-        .recursion_desired = true,
-        .recursion_available = true,
-    };
-    const header = data.Header{
-        .ID = mkid(),
-        .flags = flags,
-        .number_of_questions = 1,
-    };
-    const message = data.Message{
-        .header = header,
-        .questions = &[_]data.Question{question},
-        .records = &[_]data.Record{},
-    };
-
+pub fn writeMessage(writer: anytype, message: data.Message) !void {
     logMessage(message);
-    try writeMessage(writer, message);
 
-    return header.ID;
-}
-
-fn writeMessage(writer: anytype, message: data.Message) !void {
     // write header
     const header = message.header;
     try writer.writeInt(u16, header.ID, .big);
@@ -56,7 +34,18 @@ test "Writing a query" {
     var stream = std.io.fixedBufferStream(&buffer);
     const writer = stream.writer();
 
-    _ = try writeQuery(writer, .{ .name = "example.com", .resource_type = .A });
+    var message = data.Message.initEmpty();
+    message.questions = &[_]data.Question{
+        .{
+            .name = "example.com",
+            .resource_type = .A,
+        },
+    };
+    message.header.flags.recursion_available = true;
+    message.header.flags.recursion_desired = true;
+    message.header.number_of_questions = 1;
+
+    try writeMessage(writer, message);
 
     const written = stream.getWritten();
     const example_query = [_]u8{
@@ -171,6 +160,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
         const extra = try allocator.alloc(u8, data_len);
         errdefer allocator.free(extra);
         _ = try reader.read(extra);
+        try full_message.appendSlice(extra);
 
         const record = data.Record{
             .resource_type = @enumFromInt(r_type),
@@ -332,15 +322,6 @@ fn readName(allocator: std.mem.Allocator, full_buffer: *std.ArrayList(u8), reade
 test "Read name" {}
 
 test "Read name with pointer" {}
-
-fn mkid() u16 {
-    var rnd = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.os.getrandom(std.mem.asBytes(&seed)) catch unreachable;
-        break :blk seed;
-    });
-    return rnd.random().int(u16);
-}
 
 pub fn logMessage(msg: data.Message) void {
     log.info("┌──────", .{});

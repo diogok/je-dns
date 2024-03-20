@@ -27,6 +27,26 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const exe = b.addExecutable(.{
+            .name = "service-browser",
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = .{ .path = "src/bin/service_browser.zig" },
+            .link_libc = target.result.os.tag == .windows,
+        });
+        exe.root_module.addImport("dns", dns);
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        const run_step = b.step("run-service-browser", "Run service browser");
+        run_step.dependOn(&run_cmd.step);
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+    }
+
+    {
         const tests = b.addTest(.{
             .target = target,
             .optimize = optimize,
