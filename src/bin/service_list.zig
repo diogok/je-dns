@@ -10,10 +10,10 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    const result = dns.query(allocator, .{ .name = "_services._dns-sd._udp.local", .resource_type = .PTR }, .{});
+    const result = try dns.listLocalServices(allocator);
+    defer result.deinit();
 
-    dns.logMessage(log.info, result.query);
-    for (result.replies) |r| {
-        dns.logMessage(log.info, r);
+    for (result.services) |service| {
+        log.info("Service found: {s}", .{service});
     }
 }
