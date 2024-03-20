@@ -4,31 +4,33 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/core.zig" } });
+    const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/dns.zig" } });
 
     {
         const exe = b.addExecutable(.{
-            .name = "demo",
+            .name = "dns-query",
             .target = target,
             .optimize = optimize,
-            .root_source_file = .{ .path = "src/main.zig" },
+            .root_source_file = .{ .path = "src/bin/dns_query.zig" },
             .link_libc = target.result.os.tag == .windows,
-            //.link_libc = true,
         });
         exe.root_module.addImport("dns", dns);
 
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
-        const run_step = b.step("run", "Run demo");
+        const run_step = b.step("run-query", "Run query");
         run_step.dependOn(&run_cmd.step);
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
     }
 
     {
         const tests = b.addTest(.{
             .target = target,
             .optimize = optimize,
-            .root_source_file = .{ .path = "src/dns/core.zig" },
+            .root_source_file = .{ .path = "src/dns/dns.zig" },
         });
 
         const run_tests = b.addRunArtifact(tests);

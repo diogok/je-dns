@@ -21,7 +21,7 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, options: Opt
 }
 
 fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !data.Message {
-    const servers = try nsservers.getDNSservers(allocator);
+    const servers = try nsservers.getDNSServers(allocator);
     defer allocator.free(servers);
 
     for (servers) |address| {

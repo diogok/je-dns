@@ -9,6 +9,6 @@ test "all" {
     _ = @import("data.zig");
     _ = @import("io.zig");
     _ = @import("core.zig");
-    _ = @import("dnssd.zig");
+    _ = @import("dns_sd.zig");
     _ = @import("nsservers.zig");
 }
