@@ -1,6 +1,8 @@
 const std = @import("std");
 
 const data = @import("data.zig");
+const udp = @import("udp.zig");
+const io = @import("io.zig");
 const dns = @import("dns.zig");
 const mdns = @import("mdns.zig");
 
@@ -13,6 +15,11 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, options: Opt
         return try dns.query(allocator, question, options);
     }
 }
+
+pub const Socket = udp.Socket;
+pub const printMessage = io.printMessage;
+
+pub usingnamespace data;
 
 test "all" {
     _ = @import("io.zig");
