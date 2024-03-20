@@ -12,7 +12,7 @@ const log = std.log.scoped(.with_dns);
 
 pub const Options = struct {};
 
-pub fn query(allocator: std.mem.Allocator, question: data.Question, options: Options) !data.Message {
+pub fn query(allocator: std.mem.Allocator, question: data.Question, options: Options) !Result {
     if (isLocal(question.name)) {
         return try queryMDNS(allocator, question, options);
     } else {
@@ -20,18 +20,22 @@ pub fn query(allocator: std.mem.Allocator, question: data.Question, options: Opt
     }
 }
 
-fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !data.Message {
-    const servers = try nsservers.getDNSServers(allocator);
-    defer allocator.free(servers);
+fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !Result {
+    var questions = try allocator.alloc(data.Question, 1);
+    errdefer allocator.free(questions);
+    questions[0] = question;
 
     var message = data.Message.initEmpty();
-    message.questions = &[_]data.Question{question};
+    message.questions = questions;
+    message.header.ID = data.mkid();
+    message.header.number_of_questions = 1;
     message.header.flags.recursion_available = true;
     message.header.flags.recursion_desired = true;
-    message.header.number_of_questions = 1;
 
+    const servers = try nsservers.getDNSServers(allocator);
+    defer allocator.free(servers);
     for (servers) |address| {
-        log.info("Trying address: {any}", .{address});
+        log.debug("Trying address: {any}", .{address});
 
         var socket = try udp.Socket.init(address);
         defer socket.deinit();
@@ -46,50 +50,80 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
         try socket.receive();
 
         const reply = try io.readMessage(allocator, socket.reader());
-        if (reply.records.len > 0) {
-            return reply;
-        } else {
-            reply.deinit();
-        }
+
+        var replies = try allocator.alloc(data.Message, 1);
+        replies[0] = reply;
+        return Result{
+            .allocator = allocator,
+            .query = message,
+            .replies = replies,
+        };
     }
 
-    return error.NoAnswer;
+    const result = Result{
+        .allocator = allocator,
+        .query = message,
+        .replies = &[_]data.Message{},
+    };
+    return result;
 }
 
-fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !data.Message {
-    const servers = nsservers.getMDNSServers();
+fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !Result {
+    var replies = std.ArrayList(data.Message).init(allocator);
+    defer replies.deinit();
+
+    var questions = try allocator.alloc(data.Question, 1);
+    errdefer allocator.free(questions);
+    questions[0] = question;
 
     var message = data.Message.initEmpty();
-    message.questions = &[_]data.Question{question};
+    message.questions = questions;
+    message.header.ID = data.mkid();
     message.header.number_of_questions = 1;
 
-    for (servers) |addresses| {
-        const bind_address = addresses[0];
-        const group_address = addresses[1];
-        log.info("Trying address: Bind: {any}, MC: {any}", .{ bind_address, group_address });
+    const ip6_any = try std.net.Address.parseIp("::", 5353);
+    const ip6_mdns = try std.net.Address.parseIp("ff02::fb", 5353);
 
-        var socket = try udp.Socket.init(bind_address);
-        defer socket.deinit();
+    var ip6_socket = try udp.Socket.init(ip6_any);
+    defer ip6_socket.deinit();
 
-        try udp.setTimeout(socket.handle);
-        try udp.enableReuse(socket.handle);
+    const ip4_mdns = try std.net.Address.parseIp("224.0.0.251", 5353);
 
-        try socket.bind();
+    var ip4_socket = try udp.Socket.init(ip4_mdns);
+    defer ip4_socket.deinit();
 
-        try udp.addMembership(socket.handle, group_address);
-        try udp.setupMulticast(socket.handle, group_address);
+    {
+        try udp.setTimeout(ip6_socket.handle);
+        try udp.setTimeout(ip4_socket.handle);
 
-        try io.writeMessage(socket.writer(), message);
-        try socket.sendTo();
+        try udp.enableReuse(ip6_socket.handle);
+        try udp.enableReuse(ip4_socket.handle);
 
-        var i: u8 = 0;
-        const limit: u8 = 55;
-        while (i < limit) : (i += 1) {
-            try socket.receive();
-            const msg = io.readMessage(allocator, socket.reader()) catch |err| {
+        try ip6_socket.bind();
+        try ip4_socket.bind();
+
+        try udp.addMembership(ip6_socket.handle, ip4_mdns);
+        try udp.addMembership(ip4_socket.handle, ip4_mdns);
+
+        try udp.setupMulticast(ip6_socket.handle, ip6_mdns);
+        try udp.setupMulticast(ip4_socket.handle, ip4_mdns);
+    }
+
+    try io.writeMessage(ip6_socket.writer(), message);
+    try ip6_socket.sendTo(ip6_mdns);
+
+    try io.writeMessage(ip4_socket.writer(), message);
+    try ip4_socket.sendTo(ip4_mdns);
+
+    var i: u8 = 0;
+    const attempts: u8 = 8;
+    const sockets = [_]*udp.Socket{ &ip6_socket, &ip4_socket };
+    while (i < attempts) : (i += 1) {
+        for (sockets) |socket| {
+            socket.receive() catch |err| {
                 switch (err) {
                     error.WouldBlock => {
-                        break;
+                        continue;
                     },
                     else => {
                         return err;
@@ -97,21 +131,52 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
                 }
             };
 
+            const msg = try io.readMessage(allocator, socket.reader());
+
+            var keep = false;
             if (msg.header.flags.query_or_reply == .reply) {
                 for (msg.records) |r| {
                     if (std.ascii.eqlIgnoreCase(r.name, question.name)) {
-                        return msg;
+                        keep = true;
+                        break;
                     }
                 }
             }
 
-            msg.deinit();
+            if (keep) {
+                try replies.append(msg);
+            } else {
+                msg.deinit(allocator);
+            }
         }
     }
 
-    return error.NoAnswer;
+    const result = Result{
+        .allocator = allocator,
+        .query = message,
+        .replies = try replies.toOwnedSlice(),
+    };
+    return result;
 }
 
 fn isLocal(address: []const u8) bool {
     return std.ascii.endsWithIgnoreCase(address, ".local") or std.ascii.endsWithIgnoreCase(address, ".local.");
 }
+
+pub const Result = struct {
+    allocator: std.mem.Allocator,
+
+    query: data.Message,
+    replies: []data.Message,
+
+    pub fn deinit(self: @This()) void {
+        //self.query.deinit(self.allocator);
+        self.allocator.free(self.query.questions);
+        for (self.replies) |r| {
+            r.deinit(self.allocator);
+        }
+        self.allocator.free(self.replies);
+    }
+};
+
+pub const logMessage = io.logMessage;

@@ -8,7 +8,7 @@ const data = @import("data.zig");
 const log = std.log.scoped(.with_dns);
 
 pub fn writeMessage(writer: anytype, message: data.Message) !void {
-    logMessage(message);
+    //logMessage(log.debug, message);
 
     // write header
     const header = message.header;
@@ -100,87 +100,131 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
     try full_message.appendSlice(header_buffer[0..]);
 
     const header = readHeader(header_buffer[0..]);
-
-    // read questions
-    var questions = std.ArrayList(data.Question).init(allocator);
+    const questions = try readQuestions(allocator, header.number_of_questions, reader, &full_message);
     errdefer {
-        for (questions.items) |q| {
+        for (questions) |q| {
             allocator.free(q.name);
         }
-        questions.deinit();
-    }
-    var i: usize = 0;
-    while (i < header.number_of_questions) : (i += 1) {
-        const name = try readName(allocator, &full_message, reader);
-        errdefer allocator.free(name);
-
-        var q_buffer: [4]u8 = undefined;
-        _ = try reader.read(&q_buffer);
-        try full_message.appendSlice(q_buffer[0..]);
-
-        const q_pack = Pack.init(&q_buffer, 2);
-        const r_type = q_pack.get(0);
-        const r_class = q_pack.get(1);
-        const question = data.Question{
-            .name = name,
-            .resource_type = @enumFromInt(r_type),
-            .resource_class = @enumFromInt(r_class),
-        };
-
-        try questions.append(question);
+        allocator.free(questions);
     }
 
-    var records = std.ArrayList(data.Record).init(allocator);
+    const records = try readRecords(allocator, header.number_of_answers, reader, &full_message);
     errdefer {
-        for (records.items) |r| {
-            allocator.free(r.name);
-            allocator.free(r.data);
+        for (records) |r| {
+            r.deinit(allocator);
         }
-        records.deinit();
+        allocator.free(records);
     }
-    i = 0;
-    while (i < header.number_of_answers) : (i += 1) {
-        const name = try readName(allocator, &full_message, reader);
-        errdefer allocator.free(name);
 
-        var r_buffer: [10]u8 = undefined;
-        _ = try reader.read(&r_buffer);
-        try full_message.appendSlice(r_buffer[0..]);
+    const authority_records = try readRecords(allocator, header.number_of_authority_resource_records, reader, &full_message);
+    errdefer {
+        for (authority_records) |r| {
+            r.deinit(allocator);
+        }
+        allocator.free(authority_records);
+    }
 
-        const q_pack = Pack.init(r_buffer[0..4], 2);
-        const r_type = q_pack.get(0);
-        const r_class = q_pack.get(1);
-
-        const ttl_pack = Pack2.init(r_buffer[4..8], 1);
-        const ttl = ttl_pack.get(0);
-
-        const l_pack = Pack.init(r_buffer[8..10], 1);
-        const data_len = l_pack.get(0);
-
-        const extra = try allocator.alloc(u8, data_len);
-        errdefer allocator.free(extra);
-        _ = try reader.read(extra);
-        try full_message.appendSlice(extra);
-
-        const record = data.Record{
-            .resource_type = @enumFromInt(r_type),
-            .resource_class = @enumFromInt(r_class),
-            .ttl = ttl,
-            .name = name,
-            .data = extra,
-        };
-        try records.append(record);
+    const additional_records = try readRecords(allocator, header.number_of_additional_resource_records, reader, &full_message);
+    errdefer {
+        for (additional_records) |r| {
+            r.deinit(allocator);
+        }
+        allocator.free(additional_records);
     }
 
     const message = data.Message{
-        .allocator = allocator,
         .header = header,
-        .questions = try questions.toOwnedSlice(),
-        .records = try records.toOwnedSlice(),
+        .questions = questions,
+        .records = records,
+        .authority_records = authority_records,
+        .additional_records = additional_records,
     };
 
-    logMessage(message);
+    //logMessage(log.debug, message);
     return message;
+}
+
+test "Read reply" {
+    const buffer = [_]u8{
+        1, 0, // ID
+        0b10100001, 0b10000000, // flags
+        0, 1, //  number of questions  = 1
+        0, 2, // number of answers = 1
+        0, 1, // number of authority answers = 1
+        0, 1, // number of additional records = 1
+        //  question
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        // record
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        0b11000000, 20, // last label of name is a pointer
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        1, 2, 3, 4, // data
+        // record
+        3, 'w', 'w', 'w', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        4, 3, 2, 1, // data
+        // authority record
+        3, 'w', 'w', '2', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        4, 3, 2, 1, // data
+        // additional record
+        3, 'w', 'w', '1', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        4, 3, 2, 1, // data
+    };
+
+    var stream = std.io.fixedBufferStream(&buffer);
+    const reader = stream.reader();
+
+    const reply = try readMessage(testing.allocator, reader);
+    defer reply.deinit(testing.allocator);
+
+    try testing.expectEqual(reply.header.ID, 256);
+    try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
+    try testing.expectEqual(reply.header.flags.recursion_desired, true);
+    try testing.expectEqual(reply.header.flags.recursion_available, true);
+    try testing.expectEqual(reply.header.flags.response_code, .no_error);
+    try testing.expectEqual(reply.header.number_of_questions, 1);
+    try testing.expectEqual(reply.header.number_of_answers, 2);
+    try testing.expectEqual(reply.questions.len, 1);
+    try testing.expectEqual(reply.records.len, 2);
+    try testing.expectEqual(reply.authority_records.len, 1);
+    try testing.expectEqual(reply.additional_records.len, 1);
+
+    try testing.expectEqualStrings(reply.questions[0].name, "example.com");
+    try testing.expectEqual(reply.questions[0].resource_type, data.ResourceType.A);
+    try testing.expectEqual(reply.questions[0].resource_class, data.ResourceClass.IN);
+
+    try testing.expectEqualStrings(reply.records[0].name, "example.com");
+    try testing.expectEqual(reply.records[0].resource_type, data.ResourceType.A);
+    try testing.expectEqual(reply.records[0].resource_class, data.ResourceClass.IN);
+    try testing.expectEqual(reply.records[0].ttl, 16777472);
+
+    const ip1234 = try std.net.Address.parseIp("1.2.3.4", 0);
+    try testing.expect(reply.records[0].data.address.eql(ip1234));
+
+    try testing.expectEqualStrings(reply.records[1].name, "www.example.com");
+    const ip4321 = try std.net.Address.parseIp("4.3.2.1", 0);
+    try testing.expect(reply.records[1].data.address.eql(ip4321));
+
+    try testing.expectEqualStrings(reply.authority_records[0].name, "ww2.example.com");
+    try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
 }
 
 fn readHeader(buffer: []u8) data.Header {
@@ -203,98 +247,140 @@ fn readHeader(buffer: []u8) data.Header {
 
     return header;
 }
+fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, full_message: *std.ArrayList(u8)) ![]data.Question {
+    var i: usize = 0;
 
-test "Read reply" {
-    const buffer = [_]u8{
-        1, 0, // ID
-        0b10100001, 0b10000000, // flags
-        0, 1, //  number of questions  = 1
-        0, 2, // number of answers = 1
-        0, 0, 0, 0, //  other "number of"
-        //  question
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
-        3, 'c', 'o', 'm', 0, // last label of name
-        0, 1, 0, 1, // question type = A, class = IN
-        // record
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
-        0b11000000, 20, // last label of name is a pointer
-        0, 1, 0, 1, // question type = A, class = IN
-        1, 0, 1, 0, // ttl = 16777472
-        0, 4, // length
-        1, 2, 3, 4, // data
-        // record
-        3, 'w', 'w', 'w', // first label of name
-        0b11000000, 29, // last label of name is a pointer recur
-        //3, 'c', 'o', 'm', 0, // last label of name
-        0, 1, 0, 1, // question type = A, class = IN
-        1, 0, 1, 0, // ttl = 16777472
-        0, 4, // length
-        4, 3, 2, 1, // data
-    };
+    var questions = try allocator.alloc(data.Question, n);
+    errdefer {
+        for (questions[0..i]) |q| {
+            allocator.free(q.name);
+        }
+        allocator.free(questions);
+    }
 
-    var stream = std.io.fixedBufferStream(&buffer);
-    const reader = stream.reader();
+    while (i < n) : (i += 1) {
+        const name = try readName(allocator, reader, full_message);
+        errdefer allocator.free(name);
 
-    const reply = try readMessage(testing.allocator, reader);
-    defer reply.deinit();
+        var q_buffer: [4]u8 = undefined;
+        _ = try reader.read(&q_buffer);
+        try full_message.appendSlice(q_buffer[0..]);
 
-    try testing.expectEqual(reply.header.ID, 256);
-    try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
-    try testing.expectEqual(reply.header.flags.recursion_desired, true);
-    try testing.expectEqual(reply.header.flags.recursion_available, true);
-    try testing.expectEqual(reply.header.flags.response_code, .no_error);
-    try testing.expectEqual(reply.header.number_of_questions, 1);
-    try testing.expectEqual(reply.header.number_of_answers, 2);
-    try testing.expectEqual(reply.questions.len, 1);
-    try testing.expectEqual(reply.records.len, 2);
+        const q_pack = Pack.init(&q_buffer, 2);
+        const r_type = q_pack.get(0);
+        const r_class = q_pack.get(1);
+        const question = data.Question{
+            .name = name,
+            .resource_type = @enumFromInt(r_type),
+            .resource_class = @enumFromInt(r_class),
+        };
 
-    try testing.expectEqualStrings(reply.questions[0].name, "example.com");
-    try testing.expectEqual(reply.questions[0].resource_type, data.ResourceType.A);
-    try testing.expectEqual(reply.questions[0].resource_class, data.ResourceClass.IN);
-
-    try testing.expectEqualStrings(reply.records[0].name, "example.com");
-    try testing.expectEqual(reply.records[0].resource_type, data.ResourceType.A);
-    try testing.expectEqual(reply.records[0].resource_class, data.ResourceClass.IN);
-    try testing.expectEqual(reply.records[0].ttl, 16777472);
-    try testing.expectEqual(reply.records[0].data.len, 4);
-
-    try testing.expectEqual(reply.records[0].data[0], 1);
-    try testing.expectEqual(reply.records[0].data[1], 2);
-    try testing.expectEqual(reply.records[0].data[2], 3);
-    try testing.expectEqual(reply.records[0].data[3], 4);
-
-    try testing.expectEqualStrings(reply.records[1].name, "www.example.com");
-    try testing.expectEqual(reply.records[1].data[0], 4);
-    try testing.expectEqual(reply.records[1].data[1], 3);
-    try testing.expectEqual(reply.records[1].data[2], 2);
-    try testing.expectEqual(reply.records[1].data[3], 1);
+        questions[i] = question;
+    }
+    return questions;
 }
 
-fn readName(allocator: std.mem.Allocator, full_buffer: *std.ArrayList(u8), reader: anytype) ![]const u8 {
+fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_message: *std.ArrayList(u8)) ![]data.Record {
+    var i: usize = 0;
+
+    var records = try allocator.alloc(data.Record, n);
+    errdefer {
+        for (records[0..i]) |r| {
+            r.deinit(allocator);
+        }
+        allocator.free(records);
+    }
+
+    while (i < n) : (i += 1) {
+        const name = try readName(allocator, reader, full_message);
+        errdefer allocator.free(name);
+
+        var r_buffer: [10]u8 = undefined;
+        _ = try reader.read(&r_buffer);
+        try full_message.appendSlice(r_buffer[0..]);
+
+        const q_pack = Pack.init(r_buffer[0..4], 2);
+        const r_type = q_pack.get(0);
+        const r_class = q_pack.get(1);
+
+        const resource_type: data.ResourceType = @enumFromInt(r_type);
+        const resource_class: data.ResourceClass = @enumFromInt(r_class);
+
+        const ttl_pack = Pack2.init(r_buffer[4..8], 1);
+        const ttl = ttl_pack.get(0);
+
+        const l_pack = Pack.init(r_buffer[8..10], 1);
+        const data_len = l_pack.get(0);
+
+        const extra = try readRecordData(allocator, resource_type, data_len, reader, full_message);
+        errdefer extra.deinit(allocator);
+
+        const record = data.Record{
+            .resource_type = resource_type,
+            .resource_class = resource_class,
+            .ttl = ttl,
+            .name = name,
+            .data = extra,
+        };
+
+        records[i] = record;
+    }
+
+    return records;
+}
+
+fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType, n: usize, reader: anytype, full_message: *std.ArrayList(u8)) !data.RecordData {
+    switch (resource_type) {
+        .A => {
+            var bytes: [4]u8 = undefined;
+            _ = try reader.read(&bytes);
+            try full_message.appendSlice(bytes[0..]);
+            const addr = std.net.Address.initIp4(bytes, 0);
+            return .{ .address = addr };
+        },
+        .AAAA => {
+            var bytes: [16]u8 = undefined;
+            _ = try reader.read(&bytes);
+            try full_message.appendSlice(bytes[0..]);
+            const addr = std.net.Address.initIp6(bytes, 0, 0, 0);
+            return .{ .address = addr };
+        },
+        .PTR => {
+            return .{ .bytes = try readName(allocator, reader, full_message) };
+        },
+        else => {
+            var bytes = try allocator.alloc(u8, n);
+            errdefer allocator.free(bytes);
+            _ = try reader.read(bytes);
+            try full_message.appendSlice(bytes[0..]);
+            return .{ .bytes = bytes };
+        },
+    }
+}
+
+fn readName(allocator: std.mem.Allocator, reader: anytype, full_message: *std.ArrayList(u8)) ![]const u8 {
     var name_buffer = std.ArrayList(u8).init(allocator);
     defer name_buffer.deinit();
 
     var len = try reader.readByte();
-    try full_buffer.append(len);
+    try full_message.append(len);
     while (len > 0) {
         if (len & 0b11000000 == 0b11000000) {
             //const ptr0 = len;
             const ptr1 = try reader.readByte();
-            try full_buffer.append(ptr1);
+            try full_message.append(ptr1);
 
             const start: usize = @intCast(ptr1);
-            //const max = @min(full_buffer.items.len, start + 512);
-            //const re_buffer = full_buffer.items[start..max];
 
             var fake = std.ArrayList(u8).init(allocator);
             defer fake.deinit();
-            try fake.appendSlice(full_buffer.items);
+            try fake.appendSlice(full_message.items);
 
-            var stream = std.io.fixedBufferStream(full_buffer.items);
+            var stream = std.io.fixedBufferStream(full_message.items);
             const re_reader = stream.reader();
             try re_reader.skipBytes(start, .{});
 
-            const label = try readName(allocator, &fake, re_reader);
+            const label = try readName(allocator, re_reader, &fake);
             defer allocator.free(label);
 
             try name_buffer.appendSlice(label);
@@ -305,11 +391,11 @@ fn readName(allocator: std.mem.Allocator, full_buffer: *std.ArrayList(u8), reade
             defer allocator.free(label);
             _ = try reader.read(label);
 
-            try full_buffer.appendSlice(label);
+            try full_message.appendSlice(label);
             try name_buffer.appendSlice(label);
 
             len = try reader.readByte();
-            try full_buffer.append(len);
+            try full_message.append(len);
             if (len > 0) {
                 try name_buffer.append('.');
             }
@@ -323,38 +409,95 @@ test "Read name" {}
 
 test "Read name with pointer" {}
 
-pub fn logMessage(msg: data.Message) void {
-    log.info("┌──────", .{});
-    log.info("│ ID: {d}", .{msg.header.ID});
+pub fn logMessage(logfn: anytype, msg: data.Message) void {
+    logfn("┌──────", .{});
+    logfn("│ ID: {d}", .{msg.header.ID});
 
-    log.info("│ Type: {any}", .{msg.header.flags.query_or_reply});
-    log.info("│ Opcode: {any}", .{msg.header.flags.opcode});
-    log.info("│ Authoritative: {any}", .{msg.header.flags.authoritative_answer});
-    log.info("│ Truncation: {any}", .{msg.header.flags.truncation});
-    log.info("│ Recursion desired: {any}", .{msg.header.flags.recursion_desired});
-    log.info("│ Recursion available: {any}", .{msg.header.flags.recursion_available});
-    log.info("│ Response code: {any}", .{msg.header.flags.response_code});
+    logfn("│ Type: {any}", .{msg.header.flags.query_or_reply});
+    logfn("│ Opcode: {any}", .{msg.header.flags.opcode});
+    logfn("│ Authoritative: {any}", .{msg.header.flags.authoritative_answer});
+    logfn("│ Truncation: {any}", .{msg.header.flags.truncation});
+    logfn("│ Recursion desired: {any}", .{msg.header.flags.recursion_desired});
+    logfn("│ Recursion available: {any}", .{msg.header.flags.recursion_available});
+    logfn("│ Response code: {any}", .{msg.header.flags.response_code});
 
-    log.info("│ Questions: {d}", .{msg.header.number_of_questions});
-    log.info("│ Answers: {d}", .{msg.header.number_of_answers});
-    log.info("│ Authority records: {d}", .{msg.header.number_of_authority_resource_records});
-    log.info("│ Additional records: {d}", .{msg.header.number_of_additional_resource_records});
+    logfn("│ Questions: {d}", .{msg.header.number_of_questions});
+    logfn("│ Answers: {d}", .{msg.header.number_of_answers});
+    logfn("│ Authority records: {d}", .{msg.header.number_of_authority_resource_records});
+    logfn("│ Additional records: {d}", .{msg.header.number_of_additional_resource_records});
 
     for (msg.questions, 0..) |q, i| {
-        log.info("│ => Question {d}:", .{i});
-        log.info("│ ==> Name: {s}", .{q.name});
-        log.info("│ ==> Resource type: {any}", .{q.resource_type});
-        log.info("│ ==> Resource class: {any}", .{q.resource_class});
+        logfn("│ => Question {d}:", .{i});
+        logfn("│ ==> Name: {s}", .{q.name});
+        logfn("│ ==> Resource type: {any}", .{q.resource_type});
+        logfn("│ ==> Resource class: {any}", .{q.resource_class});
     }
 
     for (msg.records, 0..) |r, i| {
-        log.info("│ => Record {d}:", .{i});
-        log.info("│ ==> Name: {s}", .{r.name});
-        log.info("│ ==> Resource type: {any}", .{r.resource_type});
-        log.info("│ ==> Resource class: {any}", .{r.resource_class});
-        log.info("│ ==> TTL: {d}", .{r.ttl});
-        log.info("│ ==> Data: {b}", .{r.data});
+        logfn("│ => Record {d}:", .{i});
+        logfn("│ ==> Name: {s}", .{r.name});
+        logfn("│ ==> Resource type: {any}", .{r.resource_type});
+        logfn("│ ==> Resource class: {any}", .{r.resource_class});
+        logfn("│ ==> TTL: {d}", .{r.ttl});
+        switch (r.resource_type) {
+            .A, .AAAA => {
+                logfn("│ ==> Data (IP): {any}", .{r.data.address});
+            },
+            .PTR => {
+                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            },
+            .TXT => {
+                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            },
+            else => {
+                logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
+            },
+        }
     }
 
-    log.info("└──────", .{});
+    for (msg.authority_records, 0..) |r, i| {
+        logfn("│ => Authority Record {d}:", .{i});
+        logfn("│ ==> Name: {s}", .{r.name});
+        logfn("│ ==> Resource type: {any}", .{r.resource_type});
+        logfn("│ ==> Resource class: {any}", .{r.resource_class});
+        logfn("│ ==> TTL: {d}", .{r.ttl});
+        switch (r.resource_type) {
+            .A, .AAAA => {
+                logfn("│ ==> Data (IP): {any}", .{r.data.address});
+            },
+            .PTR => {
+                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            },
+            .TXT => {
+                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            },
+            else => {
+                logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
+            },
+        }
+    }
+
+    for (msg.additional_records, 0..) |r, i| {
+        logfn("│ => Additional Record {d}:", .{i});
+        logfn("│ ==> Name: {s}", .{r.name});
+        logfn("│ ==> Resource type: {any}", .{r.resource_type});
+        logfn("│ ==> Resource class: {any}", .{r.resource_class});
+        logfn("│ ==> TTL: {d}", .{r.ttl});
+        switch (r.resource_type) {
+            .A, .AAAA => {
+                logfn("│ ==> Data (IP): {any}", .{r.data.address});
+            },
+            .PTR => {
+                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            },
+            .TXT => {
+                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            },
+            else => {
+                logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
+            },
+        }
+    }
+
+    logfn("└──────", .{});
 }

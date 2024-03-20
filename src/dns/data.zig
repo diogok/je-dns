@@ -47,10 +47,50 @@ pub const ResourceType = enum(u16) {
     A = 1,
     NS = 2,
     CNAME = 5,
+    SOA = 6,
     PTR = 12,
+    MX = 15,
     TXT = 16,
     AAAA = 28,
     SRV = 33,
+
+    AFSDB = 18,
+    APL = 42,
+    CAA = 257,
+    CERT = 60,
+    CDS = 37,
+    CSYNC = 62,
+    DHCID = 49,
+    DLV = 32769,
+    DNAME = 39,
+    DNSKEY = 48,
+    DS = 43,
+    EUI48 = 108,
+    EUI64 = 109,
+    HINFO = 13,
+    HIP = 55,
+    HTTPS = 65,
+    IPSECKEY = 45,
+    KEY = 25,
+    KX = 36,
+    LOC = 29,
+    NAPTR = 35,
+    NSEC = 47,
+    NSEC3 = 50,
+    NSEC3PARAM = 51,
+    OPENPGPKEY = 61,
+    RP = 17,
+    RRSIG = 46,
+    SIG = 24,
+    SMIMEA = 53,
+    SSHFP = 44,
+    SVCB = 64,
+    TA = 32768,
+    TKEY = 249,
+    TLSA = 22,
+    TSIG = 250,
+    URI = 256,
+    ZONEMD = 63,
     _,
 };
 
@@ -66,40 +106,69 @@ pub const Question = struct {
 };
 
 pub const Record = struct {
+    name: []const u8,
     resource_type: ResourceType,
     resource_class: ResourceClass,
     ttl: u32,
-    data: []const u8,
-    name: []const u8,
+    data: RecordData,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        self.data.deinit(allocator);
+    }
+};
+
+pub const RecordData = union(enum) {
+    address: std.net.Address,
+    bytes: []const u8,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        switch (self) {
+            .address => {},
+            .bytes => |bytes| {
+                allocator.free(bytes);
+            },
+        }
+    }
 };
 
 pub const Message = struct {
-    allocator: ?std.mem.Allocator = null,
-
     header: Header,
     questions: []const Question,
     records: []const Record,
+    authority_records: []const Record,
+    additional_records: []const Record,
 
     pub fn initEmpty() @This() {
         return Message{
             .header = Header{},
             .questions = &[_]Question{},
             .records = &[_]Record{},
+            .authority_records = &[_]Record{},
+            .additional_records = &[_]Record{},
         };
     }
 
-    pub fn deinit(self: @This()) void {
-        if (self.allocator) |allocator| {
-            for (self.questions) |q| {
-                allocator.free(q.name);
-            }
-            allocator.free(self.questions);
-            for (self.records) |r| {
-                allocator.free(r.name);
-                allocator.free(r.data);
-            }
-            allocator.free(self.records);
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        for (self.questions) |q| {
+            allocator.free(q.name);
         }
+        allocator.free(self.questions);
+
+        for (self.records) |r| {
+            r.deinit(allocator);
+        }
+        allocator.free(self.records);
+
+        for (self.authority_records) |r| {
+            r.deinit(allocator);
+        }
+        allocator.free(self.authority_records);
+
+        for (self.additional_records) |r| {
+            r.deinit(allocator);
+        }
+        allocator.free(self.additional_records);
     }
 };
 

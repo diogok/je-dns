@@ -13,21 +13,6 @@ pub fn getDNSServers(allocator: std.mem.Allocator) ![]std.net.Address {
     }
 }
 
-pub fn getMDNSServers() [2][2]std.net.Address {
-    return [2][2]std.net.Address{
-        [2]std.net.Address{
-            std.net.Address.parseIp("::", 5353) catch unreachable,
-            //std.net.Address.parseIp("ff02::fb", 5353) catch unreachable,
-            std.net.Address.parseIp("ff02::fb", 5353) catch unreachable,
-        },
-        [2]std.net.Address{
-            //std.net.Address.parseIp("0.0.0.0", 5353) catch unreachable,
-            std.net.Address.parseIp("224.0.0.251", 5353) catch unreachable,
-            std.net.Address.parseIp("224.0.0.251", 5353) catch unreachable,
-        },
-    };
-}
-
 // Resolv.conf
 
 fn get_resolvconf_dns_servers(allocator: std.mem.Allocator) ![]std.net.Address {

@@ -43,9 +43,9 @@ pub const Socket = struct {
         self.reset();
     }
 
-    pub fn sendTo(self: *@This()) !void {
+    pub fn sendTo(self: *@This(), address: std.net.Address) !void {
         const bytes = self.buffer[0..self.len];
-        _ = try std.os.sendto(self.handle, bytes, 0, &self.address.any, self.address.getOsSockLen());
+        _ = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
         self.reset();
     }
 
@@ -142,7 +142,7 @@ test "Socket read and write" {
 }
 
 pub fn setTimeout(fd: std.os.socket_t) !void {
-    const micros: i32 = 1000000;
+    const micros: i32 = 0.2 * 1000000;
     if (micros > 0) {
         var timeout: std.os.timeval = undefined;
         timeout.tv_sec = @as(c_long, @intCast(@divTrunc(micros, 1000000)));

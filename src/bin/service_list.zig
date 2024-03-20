@@ -10,6 +10,10 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    const services = dns.query(allocator, .{ .name = "_tcp._local", .resource_type = .PTR }, .{});
-    log.info("TCP PTR {any}\n", .{services});
+    const result = dns.query(allocator, .{ .name = "_services._dns-sd._udp.local", .resource_type = .PTR }, .{});
+
+    dns.logMessage(log.info, result.query);
+    for (result.replies) |r| {
+        dns.logMessage(log.info, r);
+    }
 }

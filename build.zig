@@ -7,6 +7,35 @@ pub fn build(b: *std.Build) void {
     const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/dns.zig" } });
 
     {
+        const tests = b.addTest(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = .{ .path = "src/dns/dns.zig" },
+        });
+
+        const run_tests = b.addRunArtifact(tests);
+        const run_test_step = b.step("test", "Run tests");
+        run_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const exe = b.addExecutable(.{
+            .name = "example",
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = .{ .path = "src/bin/example.zig" },
+            .link_libc = target.result.os.tag == .windows,
+        });
+        exe.root_module.addImport("dns", dns);
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        const run_step = b.step("run", "Run example");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    {
         const exe = b.addExecutable(.{
             .name = "dns-query",
             .target = target,
@@ -41,20 +70,5 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addRunArtifact(exe);
         const run_step = b.step("run-service-browser", "Run service browser");
         run_step.dependOn(&run_cmd.step);
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-    }
-
-    {
-        const tests = b.addTest(.{
-            .target = target,
-            .optimize = optimize,
-            .root_source_file = .{ .path = "src/dns/dns.zig" },
-        });
-
-        const run_tests = b.addRunArtifact(tests);
-        const run_test_step = b.step("test", "Run tests");
-        run_test_step.dependOn(&run_tests.step);
     }
 }
