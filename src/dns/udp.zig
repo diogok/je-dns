@@ -43,11 +43,12 @@ pub const Socket = struct {
         self.reset();
     }
 
-    pub fn sendTo(self: *@This(), address: std.net.Address) !void {
+    pub fn sendTo(self: *@This()) !void {
         const bytes = self.buffer[0..self.len];
-        _ = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
+        _ = try std.os.sendto(self.handle, bytes, 0, &self.address.any, self.address.getOsSockLen());
         self.reset();
     }
+
     pub fn writer(self: *@This()) std.io.AnyWriter {
         return .{
             .context = self,

@@ -45,12 +45,12 @@ pub const ReplyCode = enum(u4) {
 
 pub const ResourceType = enum(u16) {
     A = 1,
-    AAAA = 28,
-    CNAME = 5,
     NS = 2,
+    CNAME = 5,
     PTR = 12,
-    SRV = 33,
     TXT = 16,
+    AAAA = 28,
+    SRV = 33,
     _,
 };
 
