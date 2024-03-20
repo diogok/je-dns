@@ -304,7 +304,7 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_mes
         const r_class = q_pack.get(1);
 
         const resource_type: data.ResourceType = @enumFromInt(r_type);
-        const resource_class: data.ResourceClass = @enumFromInt(r_class);
+        const resource_class: data.ResourceClass = @enumFromInt(r_class & 0b1);
 
         const ttl_pack = Pack2.init(r_buffer[4..8], 1);
         const ttl = ttl_pack.get(0);
@@ -312,8 +312,18 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_mes
         const l_pack = Pack.init(r_buffer[8..10], 1);
         const data_len = l_pack.get(0);
 
+        const before = full_message.items.len;
         const extra = try readRecordData(allocator, resource_type, data_len, reader, full_message);
         errdefer extra.deinit(allocator);
+        const after = full_message.items.len;
+        const missing = data_len - (after - before);
+
+        if (missing > 0) {
+            const missing_buffer = try allocator.alloc(u8, missing);
+            defer allocator.free(missing_buffer);
+            _ = try reader.read(missing_buffer);
+            try full_message.appendSlice(missing_buffer);
+        }
 
         const record = data.Record{
             .resource_type = resource_type,
@@ -348,11 +358,60 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
         .PTR => {
             return .{ .bytes = try readName(allocator, reader, full_message) };
         },
+        .SRV => {
+            var i_buffer: [6]u8 = undefined;
+            _ = try reader.read(&i_buffer);
+            try full_message.appendSlice(i_buffer[0..]);
+
+            const i_pack = Pack.init(&i_buffer, 3);
+            const weight = i_pack.get(0);
+            const priority = i_pack.get(1);
+            const port = i_pack.get(2);
+
+            const target = try readName(allocator, reader, full_message);
+
+            return .{
+                .service = .{
+                    .weight = weight,
+                    .priority = priority,
+                    .port = port,
+                    .target = target,
+                },
+            };
+        },
+        .TXT => {
+            var texts = std.ArrayList([]const u8).init(allocator);
+            errdefer {
+                for (texts.items) |text| {
+                    allocator.free(text);
+                }
+                texts.deinit();
+            }
+
+            var total: usize = 0;
+            while (total < n) {
+                const len = try reader.readByte();
+                try full_message.append(len);
+                total += 1;
+
+                const text = try allocator.alloc(u8, len);
+                errdefer allocator.free(text);
+
+                _ = try reader.read(text);
+                try full_message.appendSlice(text);
+                total += len;
+
+                try texts.append(text);
+            }
+            return .{ .text = try texts.toOwnedSlice() };
+        },
         else => {
             var bytes = try allocator.alloc(u8, n);
             errdefer allocator.free(bytes);
+
             _ = try reader.read(bytes);
             try full_message.appendSlice(bytes[0..]);
+
             return .{ .bytes = bytes };
         },
     }
@@ -365,12 +424,16 @@ fn readName(allocator: std.mem.Allocator, reader: anytype, full_message: *std.Ar
     var len = try reader.readByte();
     try full_message.append(len);
     while (len > 0) {
-        if (len & 0b11000000 == 0b11000000) {
-            //const ptr0 = len;
+        if (len >= 192) {
+            const ptr0 = len & 0b00111111;
             const ptr1 = try reader.readByte();
             try full_message.append(ptr1);
 
-            const start: usize = @intCast(ptr1);
+            var ptrs = [_]u8{ ptr0, ptr1 };
+            const p_pack = Pack.init(&ptrs, 1);
+            const ptr = p_pack.get(0);
+
+            const start: usize = @intCast(ptr);
 
             var fake = std.ArrayList(u8).init(allocator);
             defer fake.deinit();
@@ -435,69 +498,45 @@ pub fn logMessage(logfn: anytype, msg: data.Message) void {
 
     for (msg.records, 0..) |r, i| {
         logfn("│ => Record {d}:", .{i});
-        logfn("│ ==> Name: {s}", .{r.name});
-        logfn("│ ==> Resource type: {any}", .{r.resource_type});
-        logfn("│ ==> Resource class: {any}", .{r.resource_class});
-        logfn("│ ==> TTL: {d}", .{r.ttl});
-        switch (r.resource_type) {
-            .A, .AAAA => {
-                logfn("│ ==> Data (IP): {any}", .{r.data.address});
-            },
-            .PTR => {
-                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
-            },
-            .TXT => {
-                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
-            },
-            else => {
-                logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
-            },
-        }
+        logRecord(logfn, r);
     }
 
     for (msg.authority_records, 0..) |r, i| {
         logfn("│ => Authority Record {d}:", .{i});
-        logfn("│ ==> Name: {s}", .{r.name});
-        logfn("│ ==> Resource type: {any}", .{r.resource_type});
-        logfn("│ ==> Resource class: {any}", .{r.resource_class});
-        logfn("│ ==> TTL: {d}", .{r.ttl});
-        switch (r.resource_type) {
-            .A, .AAAA => {
-                logfn("│ ==> Data (IP): {any}", .{r.data.address});
-            },
-            .PTR => {
-                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
-            },
-            .TXT => {
-                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
-            },
-            else => {
-                logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
-            },
-        }
+        logRecord(logfn, r);
     }
 
     for (msg.additional_records, 0..) |r, i| {
         logfn("│ => Additional Record {d}:", .{i});
-        logfn("│ ==> Name: {s}", .{r.name});
-        logfn("│ ==> Resource type: {any}", .{r.resource_type});
-        logfn("│ ==> Resource class: {any}", .{r.resource_class});
-        logfn("│ ==> TTL: {d}", .{r.ttl});
-        switch (r.resource_type) {
-            .A, .AAAA => {
-                logfn("│ ==> Data (IP): {any}", .{r.data.address});
-            },
-            .PTR => {
-                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
-            },
-            .TXT => {
-                logfn("│ ==> Data (string): {str}", .{r.data.bytes});
-            },
-            else => {
-                logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
-            },
-        }
+        logRecord(logfn, r);
     }
 
     logfn("└──────", .{});
+}
+
+fn logRecord(logfn: anytype, r: data.Record) void {
+    logfn("│ ==> Name: {s}", .{r.name});
+    logfn("│ ==> Resource type: {any}", .{r.resource_type});
+    logfn("│ ==> Resource class: {any}", .{r.resource_class});
+    logfn("│ ==> TTL: {d}", .{r.ttl});
+    switch (r.resource_type) {
+        .A, .AAAA => {
+            logfn("│ ==> Data (IP): {any}", .{r.data.address});
+        },
+        .PTR => {
+            logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+        },
+        .TXT => {
+            logfn("│ ==> Data (text): {d}", .{r.data.text.len});
+            for (r.data.text) |txt| {
+                logfn("│ ===> {str}", .{txt});
+            }
+        },
+        .SRV => {
+            logfn("│ ==> Data (service): {d} {d} {str}:{d}", .{ r.data.service.weight, r.data.service.priority, r.data.service.target, r.data.service.port });
+        },
+        else => {
+            logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
+        },
+    }
 }

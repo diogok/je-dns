@@ -131,7 +131,17 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
                 }
             };
 
-            const msg = try io.readMessage(allocator, socket.reader());
+            const msg = io.readMessage(allocator, socket.reader()) catch |err| {
+                switch (err) {
+                    error.EndOfStream => {
+                        log.warn("Skipping message due to EndOfStream.", .{});
+                        continue;
+                    },
+                    else => {
+                        return err;
+                    },
+                }
+            };
 
             var keep = false;
             if (msg.header.flags.query_or_reply == .reply) {
@@ -180,3 +190,10 @@ pub const Result = struct {
 };
 
 pub const logMessage = io.logMessage;
+
+pub fn logResult(logfn: anytype, result: Result) void {
+    logMessage(logfn, result.query);
+    for (result.replies) |r| {
+        logMessage(logfn, r);
+    }
+}

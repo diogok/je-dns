@@ -119,12 +119,28 @@ pub const Record = struct {
 };
 
 pub const RecordData = union(enum) {
-    address: std.net.Address,
     bytes: []const u8,
+    address: std.net.Address,
+    service: struct {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: []const u8,
+    },
+    text: [][]const u8,
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         switch (self) {
             .address => {},
+            .service => |srv| {
+                allocator.free(srv.target);
+            },
+            .text => |text| {
+                for (text) |txt| {
+                    allocator.free(txt);
+                }
+                allocator.free(text);
+            },
             .bytes => |bytes| {
                 allocator.free(bytes);
             },
