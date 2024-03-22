@@ -84,22 +84,15 @@ test "Write a name" {
     try testing.expectEqualStrings("\x03www\x07example\x03com\x00", written);
 }
 
-// To read the u16 as big endian
-const Pack = std.PackedIntSliceEndian(u16, .big);
-const Pack2 = std.PackedIntSliceEndian(u32, .big);
-
 pub fn readMessage(allocator: std.mem.Allocator, reader0: anytype) !data.Message {
     // read all of the request, because we might need the all bytes for pointer/compressed labels
     const all_bytes = try reader0.readAllAlloc(allocator, 4096);
     defer allocator.free(all_bytes);
 
     var stream = std.io.fixedBufferStream(all_bytes);
-    var reader = stream.reader();
+    const reader = stream.reader();
 
-    var header_buffer: [12]u8 = undefined;
-    _ = try reader.read(&header_buffer);
-
-    const header = readHeader(header_buffer[0..]);
+    const header = try readHeader(reader);
     const questions = try readQuestions(allocator, header.number_of_questions, reader, all_bytes);
     errdefer {
         for (questions) |q| {
@@ -227,25 +220,20 @@ test "Read reply" {
     try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
 }
 
-fn readHeader(buffer: []u8) data.Header {
-    const header_pack = Pack.init(buffer, 6); // To read the u16 as big endian
-
-    var flag_bits = header_pack.get(1);
+fn readHeader(reader: anytype) !data.Header {
+    const id = try reader.readInt(u16, .big);
+    var flag_bits = try reader.readInt(u16, .big);
     if (builtin.cpu.arch.endian() == .little) {
         flag_bits = @bitReverse(flag_bits);
     }
-    const flags: data.Flags = @bitCast(flag_bits);
-
-    const header = data.Header{
-        .ID = header_pack.get(0),
-        .flags = flags,
-        .number_of_questions = header_pack.get(2),
-        .number_of_answers = header_pack.get(3),
-        .number_of_authority_resource_records = header_pack.get(4),
-        .number_of_additional_resource_records = header_pack.get(5),
+    return data.Header{
+        .ID = id,
+        .flags = @bitCast(flag_bits),
+        .number_of_questions = try reader.readInt(u16, .big),
+        .number_of_answers = try reader.readInt(u16, .big),
+        .number_of_authority_resource_records = try reader.readInt(u16, .big),
+        .number_of_additional_resource_records = try reader.readInt(u16, .big),
     };
-
-    return header;
 }
 fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, all_bytes: []const u8) ![]data.Question {
     var i: usize = 0;
@@ -262,16 +250,12 @@ fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, all_by
         const name = try readName(allocator, reader, all_bytes);
         errdefer allocator.free(name);
 
-        var q_buffer: [4]u8 = undefined;
-        _ = try reader.read(&q_buffer);
-
-        const q_pack = Pack.init(&q_buffer, 2);
-        const r_type = q_pack.get(0);
-        const r_class = q_pack.get(1);
+        const r_type = try reader.readInt(u16, .big);
+        const r_class = try reader.readInt(u16, .big);
         const question = data.Question{
             .name = name,
             .resource_type = @enumFromInt(r_type),
-            .resource_class = @enumFromInt(r_class),
+            .resource_class = @enumFromInt(r_class & 0b1),
         };
 
         questions[i] = question;
@@ -294,21 +278,13 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, all_byte
         const name = try readName(allocator, reader, all_bytes);
         errdefer allocator.free(name);
 
-        var r_buffer: [10]u8 = undefined;
-        _ = try reader.read(&r_buffer);
-
-        const q_pack = Pack.init(r_buffer[0..4], 2);
-        const r_type = q_pack.get(0);
-        const r_class = q_pack.get(1);
+        const r_type = try reader.readInt(u16, .big);
+        const r_class = try reader.readInt(u16, .big);
+        const ttl = try reader.readInt(u32, .big);
+        const data_len = try reader.readInt(u16, .big);
 
         const resource_type: data.ResourceType = @enumFromInt(r_type);
         const resource_class: data.ResourceClass = @enumFromInt(r_class & 0b1);
-
-        const ttl_pack = Pack2.init(r_buffer[4..8], 1);
-        const ttl = ttl_pack.get(0);
-
-        const l_pack = Pack.init(r_buffer[8..10], 1);
-        const data_len = l_pack.get(0);
 
         const extra_bytes = try allocator.alloc(u8, data_len);
         defer allocator.free(extra_bytes);
@@ -340,24 +316,19 @@ fn readRecordData(
     var reader = stream.reader();
     switch (resource_type) {
         .A => {
-            const addr = std.net.Address.initIp4(data_bytes[0..4].*, 0);
-            return .{ .ip = addr };
+            return .{ .ip = std.net.Address.initIp4(data_bytes[0..4].*, 0) };
         },
         .AAAA => {
-            const addr = std.net.Address.initIp6(data_bytes[0..16].*, 0, 0, 0);
-            return .{ .ip = addr };
+            return .{ .ip = std.net.Address.initIp6(data_bytes[0..16].*, 0, 0, 0) };
         },
         .PTR => {
             return .{ .ptr = try readName(allocator, reader, all_bytes) };
         },
         .SRV => {
-            const pack = Pack.init(data_bytes, 3);
-            const weight = pack.get(0);
-            const priority = pack.get(1);
-            const port = pack.get(2);
-
+            const weight = try reader.readInt(u16, .big);
+            const priority = try reader.readInt(u16, .big);
+            const port = try reader.readInt(u16, .big);
             const target = try readName(allocator, reader, all_bytes);
-
             return .{
                 .srv = .{
                     .weight = weight,
@@ -368,12 +339,12 @@ fn readRecordData(
             };
         },
         .TXT => {
-            var texts = std.ArrayList([]const u8).init(allocator);
+            var txts = std.ArrayList([]const u8).init(allocator);
             errdefer {
-                for (texts.items) |text| {
+                for (txts.items) |text| {
                     allocator.free(text);
                 }
-                texts.deinit();
+                txts.deinit();
             }
 
             var total: usize = 0;
@@ -381,21 +352,18 @@ fn readRecordData(
                 const len = try reader.readByte();
                 total += 1;
 
-                const text = try allocator.alloc(u8, len);
-                errdefer allocator.free(text);
+                const txt = try allocator.alloc(u8, len);
+                errdefer allocator.free(txt);
 
-                _ = try reader.read(text);
+                _ = try reader.read(txt);
                 total += len;
 
-                try texts.append(text);
+                try txts.append(txt);
             }
-            return .{ .txt = try texts.toOwnedSlice() };
+            return .{ .txt = try txts.toOwnedSlice() };
         },
         else => {
-            const raw = try allocator.alloc(u8, data_bytes.len);
-            errdefer allocator.free(raw);
-            std.mem.copyForwards(u8, raw, data_bytes);
-            return .{ .raw = raw };
+            return .{ .raw = try reader.readAllAlloc(allocator, data_bytes.len) };
         },
     }
 }
@@ -407,16 +375,11 @@ fn readName(allocator: std.mem.Allocator, reader: anytype, all_bytes: []const u8
     var len = try reader.readByte();
     while (len > 0) {
         if (len >= 192) {
-            const ptr0 = len & 0b00111111;
-            const ptr1 = try reader.readByte();
+            const ptr0: u8 = len & 0b00111111;
+            const ptr1: u8 = try reader.readByte();
+            const ptr: u16 = (@as(u16, ptr0) << 8) + @as(u16, ptr1);
 
-            var ptrs = [_]u8{ ptr0, ptr1 };
-            const p_pack = Pack.init(&ptrs, 1);
-            const ptr = p_pack.get(0);
-
-            const start: usize = @intCast(ptr);
-
-            var stream = std.io.fixedBufferStream(all_bytes[start..]);
+            var stream = std.io.fixedBufferStream(all_bytes[ptr..]);
             const re_reader = stream.reader();
 
             const label = try readName(allocator, re_reader, all_bytes);
