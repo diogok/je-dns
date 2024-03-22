@@ -51,8 +51,8 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
 
         try io.writeMessage(socket.writer(), message);
 
-        try socket.send();
-        try socket.receive();
+        _ = try socket.send();
+        _ = try socket.receive();
 
         const reply = try io.readMessage(allocator, socket.reader());
 
@@ -81,10 +81,13 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
     errdefer allocator.free(questions);
     questions[0] = question;
 
-    var message = data.Message{};
-    message.questions = questions;
-    message.header.ID = data.mkid();
-    message.header.number_of_questions = 1;
+    const message = data.Message{
+        .header = .{
+            .ID = data.mkid(),
+            .number_of_questions = 1,
+        },
+        .questions = questions,
+    };
 
     const ip6_any = try std.net.Address.parseIp("::", 5353);
     const ip6_mdns = try std.net.Address.parseIp("ff02::fb", 5353);
@@ -115,17 +118,17 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
     }
 
     try io.writeMessage(ip6_socket.writer(), message);
-    try ip6_socket.sendTo(ip6_mdns);
+    _ = try ip6_socket.sendTo(ip6_mdns);
 
     try io.writeMessage(ip4_socket.writer(), message);
-    try ip4_socket.sendTo(ip4_mdns);
+    _ = try ip4_socket.sendTo(ip4_mdns);
 
     var i: u8 = 0;
     const attempts: u8 = 8;
     const sockets = [_]*udp.Socket{ &ip6_socket, &ip4_socket };
     while (i < attempts) : (i += 1) {
         for (sockets) |socket| {
-            socket.receive() catch |err| {
+            _ = socket.receive() catch |err| {
                 switch (err) {
                     error.WouldBlock => {
                         continue;

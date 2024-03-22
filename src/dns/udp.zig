@@ -37,16 +37,18 @@ pub const Socket = struct {
         self.len = 0;
     }
 
-    pub fn send(self: *@This()) !void {
+    pub fn send(self: *@This()) !usize {
         const bytes = self.buffer[0..self.len];
-        _ = try std.os.send(self.handle, bytes, 0);
+        const len = try std.os.send(self.handle, bytes, 0);
         self.reset();
+        return len;
     }
 
-    pub fn sendTo(self: *@This(), address: std.net.Address) !void {
+    pub fn sendTo(self: *@This(), address: std.net.Address) !usize {
         const bytes = self.buffer[0..self.len];
-        _ = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
+        const len = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
         self.reset();
+        return len;
     }
 
     pub fn writer(self: *@This()) std.io.AnyWriter {
@@ -79,10 +81,11 @@ pub const Socket = struct {
         };
     }
 
-    pub fn receive(self: *@This()) !void {
+    pub fn receive(self: *@This()) ![]const u8 {
         self.reset();
         const len = try std.os.recv(self.handle, &self.buffer, 0);
         self.len = len;
+        return self.buffer[0..len];
     }
 
     pub fn read(context: *const anyopaque, buffer: []u8) anyerror!usize {

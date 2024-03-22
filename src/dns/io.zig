@@ -8,8 +8,6 @@ const data = @import("data.zig");
 const log = std.log.scoped(.with_dns);
 
 pub fn writeMessage(writer: anytype, message: data.Message) !void {
-    //logMessage(log.debug, message);
-
     // write header
     const header = message.header;
     try writer.writeInt(u16, header.ID, .big);
@@ -90,17 +88,19 @@ test "Write a name" {
 const Pack = std.PackedIntSliceEndian(u16, .big);
 const Pack2 = std.PackedIntSliceEndian(u32, .big);
 
-pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message {
+pub fn readMessage(allocator: std.mem.Allocator, reader0: anytype) !data.Message {
     // read all of the request, because we might need the all bytes for pointer/compressed labels
-    var full_message = std.ArrayList(u8).init(allocator);
-    defer full_message.deinit();
+    const bytes = try reader0.readAllAlloc(allocator, 4096);
+    defer allocator.free(bytes);
+
+    var stream = std.io.fixedBufferStream(bytes);
+    var reader = stream.reader();
 
     var header_buffer: [12]u8 = undefined;
     _ = try reader.read(&header_buffer);
-    try full_message.appendSlice(header_buffer[0..]);
 
     const header = readHeader(header_buffer[0..]);
-    const questions = try readQuestions(allocator, header.number_of_questions, reader, &full_message);
+    const questions = try readQuestions(allocator, header.number_of_questions, reader, bytes);
     errdefer {
         for (questions) |q| {
             allocator.free(q.name);
@@ -108,7 +108,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
         allocator.free(questions);
     }
 
-    const records = try readRecords(allocator, header.number_of_answers, reader, &full_message);
+    const records = try readRecords(allocator, header.number_of_answers, reader, bytes);
     errdefer {
         for (records) |r| {
             r.deinit(allocator);
@@ -116,7 +116,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
         allocator.free(records);
     }
 
-    const authority_records = try readRecords(allocator, header.number_of_authority_resource_records, reader, &full_message);
+    const authority_records = try readRecords(allocator, header.number_of_authority_resource_records, reader, bytes);
     errdefer {
         for (authority_records) |r| {
             r.deinit(allocator);
@@ -124,7 +124,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader: anytype) !data.Message 
         allocator.free(authority_records);
     }
 
-    const additional_records = try readRecords(allocator, header.number_of_additional_resource_records, reader, &full_message);
+    const additional_records = try readRecords(allocator, header.number_of_additional_resource_records, reader, bytes);
     errdefer {
         for (additional_records) |r| {
             r.deinit(allocator);
@@ -247,7 +247,7 @@ fn readHeader(buffer: []u8) data.Header {
 
     return header;
 }
-fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, full_message: *std.ArrayList(u8)) ![]data.Question {
+fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes: []const u8) ![]data.Question {
     var i: usize = 0;
 
     var questions = try allocator.alloc(data.Question, n);
@@ -259,12 +259,11 @@ fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, full_m
     }
 
     while (i < n) : (i += 1) {
-        const name = try readName(allocator, reader, full_message);
+        const name = try readName(allocator, reader, bytes);
         errdefer allocator.free(name);
 
         var q_buffer: [4]u8 = undefined;
         _ = try reader.read(&q_buffer);
-        try full_message.appendSlice(q_buffer[0..]);
 
         const q_pack = Pack.init(&q_buffer, 2);
         const r_type = q_pack.get(0);
@@ -280,7 +279,7 @@ fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, full_m
     return questions;
 }
 
-fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_message: *std.ArrayList(u8)) ![]data.Record {
+fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes: []const u8) ![]data.Record {
     var i: usize = 0;
 
     var records = try allocator.alloc(data.Record, n);
@@ -292,12 +291,11 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_mes
     }
 
     while (i < n) : (i += 1) {
-        const name = try readName(allocator, reader, full_message);
+        const name = try readName(allocator, reader, bytes);
         errdefer allocator.free(name);
 
         var r_buffer: [10]u8 = undefined;
         _ = try reader.read(&r_buffer);
-        try full_message.appendSlice(r_buffer[0..]);
 
         const q_pack = Pack.init(r_buffer[0..4], 2);
         const r_type = q_pack.get(0);
@@ -312,18 +310,11 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_mes
         const l_pack = Pack.init(r_buffer[8..10], 1);
         const data_len = l_pack.get(0);
 
-        const before = full_message.items.len;
-        const extra = try readRecordData(allocator, resource_type, data_len, reader, full_message);
-        errdefer extra.deinit(allocator);
-        const after = full_message.items.len;
-        const missing = data_len - (after - before);
+        const extra_bytes = try allocator.alloc(u8, data_len);
+        defer allocator.free(extra_bytes);
+        _ = try reader.read(extra_bytes);
 
-        if (missing > 0) {
-            const missing_buffer = try allocator.alloc(u8, missing);
-            defer allocator.free(missing_buffer);
-            _ = try reader.read(missing_buffer);
-            try full_message.appendSlice(missing_buffer);
-        }
+        const extra = try readRecordData(allocator, resource_type, extra_bytes, bytes);
 
         const record = data.Record{
             .resource_type = resource_type,
@@ -339,36 +330,33 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, full_mes
     return records;
 }
 
-fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType, n: usize, reader: anytype, full_message: *std.ArrayList(u8)) !data.RecordData {
+fn readRecordData(
+    allocator: std.mem.Allocator,
+    resource_type: data.ResourceType,
+    data_bytes: anytype,
+    bytes: []const u8,
+) !data.RecordData {
+    var stream = std.io.fixedBufferStream(data_bytes);
+    var reader = stream.reader();
     switch (resource_type) {
         .A => {
-            var bytes: [4]u8 = undefined;
-            _ = try reader.read(&bytes);
-            try full_message.appendSlice(bytes[0..]);
-            const addr = std.net.Address.initIp4(bytes, 0);
+            const addr = std.net.Address.initIp4(data_bytes[0..4].*, 0);
             return .{ .ip = addr };
         },
         .AAAA => {
-            var bytes: [16]u8 = undefined;
-            _ = try reader.read(&bytes);
-            try full_message.appendSlice(bytes[0..]);
-            const addr = std.net.Address.initIp6(bytes, 0, 0, 0);
+            const addr = std.net.Address.initIp6(data_bytes[0..16].*, 0, 0, 0);
             return .{ .ip = addr };
         },
         .PTR => {
-            return .{ .raw = try readName(allocator, reader, full_message) };
+            return .{ .raw = try readName(allocator, reader, bytes) };
         },
         .SRV => {
-            var i_buffer: [6]u8 = undefined;
-            _ = try reader.read(&i_buffer);
-            try full_message.appendSlice(i_buffer[0..]);
+            const pack = Pack.init(data_bytes, 3);
+            const weight = pack.get(0);
+            const priority = pack.get(1);
+            const port = pack.get(2);
 
-            const i_pack = Pack.init(&i_buffer, 3);
-            const weight = i_pack.get(0);
-            const priority = i_pack.get(1);
-            const port = i_pack.get(2);
-
-            const target = try readName(allocator, reader, full_message);
+            const target = try readName(allocator, reader, bytes);
 
             return .{
                 .srv = .{
@@ -389,16 +377,14 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
             }
 
             var total: usize = 0;
-            while (total < n) {
+            while (total < data_bytes.len) {
                 const len = try reader.readByte();
-                try full_message.append(len);
                 total += 1;
 
                 const text = try allocator.alloc(u8, len);
                 errdefer allocator.free(text);
 
                 _ = try reader.read(text);
-                try full_message.appendSlice(text);
                 total += len;
 
                 try texts.append(text);
@@ -406,28 +392,23 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
             return .{ .txt = try texts.toOwnedSlice() };
         },
         else => {
-            var bytes = try allocator.alloc(u8, n);
-            errdefer allocator.free(bytes);
-
-            _ = try reader.read(bytes);
-            try full_message.appendSlice(bytes[0..]);
-
-            return .{ .raw = bytes };
+            const raw = try allocator.alloc(u8, data_bytes.len);
+            errdefer allocator.free(raw);
+            std.mem.copyForwards(u8, raw, data_bytes);
+            return .{ .raw = raw };
         },
     }
 }
 
-fn readName(allocator: std.mem.Allocator, reader: anytype, full_message: *std.ArrayList(u8)) ![]const u8 {
+fn readName(allocator: std.mem.Allocator, reader: anytype, all_bytes: []const u8) ![]const u8 {
     var name_buffer = std.ArrayList(u8).init(allocator);
     defer name_buffer.deinit();
 
     var len = try reader.readByte();
-    try full_message.append(len);
     while (len > 0) {
         if (len >= 192) {
             const ptr0 = len & 0b00111111;
             const ptr1 = try reader.readByte();
-            try full_message.append(ptr1);
 
             var ptrs = [_]u8{ ptr0, ptr1 };
             const p_pack = Pack.init(&ptrs, 1);
@@ -435,17 +416,11 @@ fn readName(allocator: std.mem.Allocator, reader: anytype, full_message: *std.Ar
 
             const start: usize = @intCast(ptr);
 
-            var fake = std.ArrayList(u8).init(allocator);
-            defer fake.deinit();
-            try fake.appendSlice(full_message.items);
-
-            var stream = std.io.fixedBufferStream(full_message.items);
+            var stream = std.io.fixedBufferStream(all_bytes[start..]);
             const re_reader = stream.reader();
-            try re_reader.skipBytes(start, .{});
 
-            const label = try readName(allocator, re_reader, &fake);
+            const label = try readName(allocator, re_reader, all_bytes);
             defer allocator.free(label);
-
             try name_buffer.appendSlice(label);
 
             break;
@@ -453,12 +428,9 @@ fn readName(allocator: std.mem.Allocator, reader: anytype, full_message: *std.Ar
             const label = try allocator.alloc(u8, len);
             defer allocator.free(label);
             _ = try reader.read(label);
-
-            try full_message.appendSlice(label);
             try name_buffer.appendSlice(label);
 
             len = try reader.readByte();
-            try full_message.append(len);
             if (len > 0) {
                 try name_buffer.append('.');
             }
