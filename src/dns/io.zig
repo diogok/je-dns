@@ -34,7 +34,7 @@ test "Writing a query" {
     var stream = std.io.fixedBufferStream(&buffer);
     const writer = stream.writer();
 
-    var message = data.Message.initEmpty();
+    var message = data.Message{};
     message.questions = &[_]data.Question{
         .{
             .name = "example.com",
@@ -217,11 +217,11 @@ test "Read reply" {
     try testing.expectEqual(reply.records[0].ttl, 16777472);
 
     const ip1234 = try std.net.Address.parseIp("1.2.3.4", 0);
-    try testing.expect(reply.records[0].data.address.eql(ip1234));
+    try testing.expect(reply.records[0].data.ip.eql(ip1234));
 
     try testing.expectEqualStrings(reply.records[1].name, "www.example.com");
     const ip4321 = try std.net.Address.parseIp("4.3.2.1", 0);
-    try testing.expect(reply.records[1].data.address.eql(ip4321));
+    try testing.expect(reply.records[1].data.ip.eql(ip4321));
 
     try testing.expectEqualStrings(reply.authority_records[0].name, "ww2.example.com");
     try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
@@ -346,17 +346,17 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
             _ = try reader.read(&bytes);
             try full_message.appendSlice(bytes[0..]);
             const addr = std.net.Address.initIp4(bytes, 0);
-            return .{ .address = addr };
+            return .{ .ip = addr };
         },
         .AAAA => {
             var bytes: [16]u8 = undefined;
             _ = try reader.read(&bytes);
             try full_message.appendSlice(bytes[0..]);
             const addr = std.net.Address.initIp6(bytes, 0, 0, 0);
-            return .{ .address = addr };
+            return .{ .ip = addr };
         },
         .PTR => {
-            return .{ .bytes = try readName(allocator, reader, full_message) };
+            return .{ .raw = try readName(allocator, reader, full_message) };
         },
         .SRV => {
             var i_buffer: [6]u8 = undefined;
@@ -371,7 +371,7 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
             const target = try readName(allocator, reader, full_message);
 
             return .{
-                .service = .{
+                .srv = .{
                     .weight = weight,
                     .priority = priority,
                     .port = port,
@@ -403,7 +403,7 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
 
                 try texts.append(text);
             }
-            return .{ .text = try texts.toOwnedSlice() };
+            return .{ .txt = try texts.toOwnedSlice() };
         },
         else => {
             var bytes = try allocator.alloc(u8, n);
@@ -412,7 +412,7 @@ fn readRecordData(allocator: std.mem.Allocator, resource_type: data.ResourceType
             _ = try reader.read(bytes);
             try full_message.appendSlice(bytes[0..]);
 
-            return .{ .bytes = bytes };
+            return .{ .raw = bytes };
         },
     }
 }
@@ -521,22 +521,22 @@ fn logRecord(logfn: anytype, r: data.Record) void {
     logfn("│ ==> TTL: {d}", .{r.ttl});
     switch (r.resource_type) {
         .A, .AAAA => {
-            logfn("│ ==> Data (IP): {any}", .{r.data.address});
+            logfn("│ ==> Data (IP): {any}", .{r.data.ip});
         },
         .PTR => {
-            logfn("│ ==> Data (string): {str}", .{r.data.bytes});
+            logfn("│ ==> Data (string): {str}", .{r.data.raw});
         },
         .TXT => {
-            logfn("│ ==> Data (text): {d}", .{r.data.text.len});
-            for (r.data.text) |txt| {
+            logfn("│ ==> Data (text): {d}", .{r.data.txt.len});
+            for (r.data.txt) |txt| {
                 logfn("│ ===> {str}", .{txt});
             }
         },
         .SRV => {
-            logfn("│ ==> Data (service): {d} {d} {str}:{d}", .{ r.data.service.weight, r.data.service.priority, r.data.service.target, r.data.service.port });
+            logfn("│ ==> Data (service): {d} {d} {str}:{d}", .{ r.data.srv.weight, r.data.srv.priority, r.data.srv.target, r.data.srv.port });
         },
         else => {
-            logfn("│ ==> Data (bytes): {b}", .{r.data.bytes});
+            logfn("│ ==> Data (bytes): {b}", .{r.data.raw});
         },
     }
 }

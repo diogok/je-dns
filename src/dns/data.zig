@@ -119,29 +119,29 @@ pub const Record = struct {
 };
 
 pub const RecordData = union(enum) {
-    bytes: []const u8,
-    address: std.net.Address,
-    service: struct {
+    ip: std.net.Address,
+    srv: struct {
         priority: u16,
         weight: u16,
         port: u16,
         target: []const u8,
     },
-    text: [][]const u8,
+    txt: [][]const u8,
+    raw: []const u8,
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         switch (self) {
-            .address => {},
-            .service => |srv| {
+            .ip => {},
+            .srv => |srv| {
                 allocator.free(srv.target);
             },
-            .text => |text| {
+            .txt => |text| {
                 for (text) |txt| {
                     allocator.free(txt);
                 }
                 allocator.free(text);
             },
-            .bytes => |bytes| {
+            .raw => |bytes| {
                 allocator.free(bytes);
             },
         }
@@ -149,21 +149,11 @@ pub const RecordData = union(enum) {
 };
 
 pub const Message = struct {
-    header: Header,
-    questions: []const Question,
-    records: []const Record,
-    authority_records: []const Record,
-    additional_records: []const Record,
-
-    pub fn initEmpty() @This() {
-        return Message{
-            .header = Header{},
-            .questions = &[_]Question{},
-            .records = &[_]Record{},
-            .authority_records = &[_]Record{},
-            .additional_records = &[_]Record{},
-        };
-    }
+    header: Header = Header{},
+    questions: []const Question = &[_]Question{},
+    records: []const Record = &[_]Record{},
+    authority_records: []const Record = &[_]Record{},
+    additional_records: []const Record = &[_]Record{},
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         for (self.questions) |q| {
@@ -189,10 +179,5 @@ pub const Message = struct {
 };
 
 pub fn mkid() u16 {
-    var rnd = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.os.getrandom(std.mem.asBytes(&seed)) catch unreachable;
-        break :blk seed;
-    });
-    return rnd.random().int(u16);
+    return @truncate(@as(u64, @bitCast(std.time.timestamp())));
 }

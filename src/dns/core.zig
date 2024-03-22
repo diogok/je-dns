@@ -25,12 +25,17 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
     errdefer allocator.free(questions);
     questions[0] = question;
 
-    var message = data.Message.initEmpty();
-    message.questions = questions;
-    message.header.ID = data.mkid();
-    message.header.number_of_questions = 1;
-    message.header.flags.recursion_available = true;
-    message.header.flags.recursion_desired = true;
+    const message = data.Message{
+        .header = .{
+            .ID = data.mkid(),
+            .number_of_questions = 1,
+            .flags = .{
+                .recursion_available = true,
+                .recursion_desired = true,
+            },
+        },
+        .questions = questions,
+    };
 
     const servers = try nsservers.getDNSServers(allocator);
     defer allocator.free(servers);
@@ -76,7 +81,7 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
     errdefer allocator.free(questions);
     questions[0] = question;
 
-    var message = data.Message.initEmpty();
+    var message = data.Message{};
     message.questions = questions;
     message.header.ID = data.mkid();
     message.header.number_of_questions = 1;

@@ -16,12 +16,12 @@ pub fn listLocalServices(allocator: std.mem.Allocator) !ServiceList {
     for (result.replies) |reply| {
         records: for (reply.records) |record| {
             for (services.items) |existing| {
-                if (std.mem.eql(u8, existing, record.data.bytes)) {
+                if (std.mem.eql(u8, existing, record.data.raw)) {
                     continue :records;
                 }
             }
-            const service = try allocator.alloc(u8, record.data.bytes.len);
-            std.mem.copyForwards(u8, service, record.data.bytes);
+            const service = try allocator.alloc(u8, record.data.raw.len);
+            std.mem.copyForwards(u8, service, record.data.raw);
             try services.append(service);
         }
     }
@@ -54,14 +54,14 @@ pub fn listDetailedServices(allocator: std.mem.Allocator, qname: []const u8) !De
         const service_name = name_blk: {
             for (reply.records) |record| {
                 if (std.ascii.eqlIgnoreCase(record.name, qname)) {
-                    const srv_name = record.data.bytes;
+                    const srv_name = record.data.raw;
                     for (services.items) |existing| {
                         if (std.mem.eql(u8, existing.name, srv_name)) {
                             continue :replies;
                         }
                     }
 
-                    const cp_name = try allocator.alloc(u8, record.data.bytes.len);
+                    const cp_name = try allocator.alloc(u8, record.data.raw.len);
                     std.mem.copyForwards(u8, cp_name, srv_name);
                     break :name_blk cp_name;
                 }
@@ -77,18 +77,18 @@ pub fn listDetailedServices(allocator: std.mem.Allocator, qname: []const u8) !De
         for (reply.additional_records) |record| {
             switch (record.resource_type) {
                 .A, .AAAA => {
-                    try addresses.append(record.data.address);
+                    try addresses.append(record.data.ip);
                 },
                 .TXT => {
-                    for (record.data.text) |txt| {
+                    for (record.data.txt) |txt| {
                         const cp_txt = try allocator.alloc(u8, txt.len);
                         std.mem.copyForwards(u8, cp_txt, txt);
                         try txts.append(cp_txt);
                     }
                 },
                 .SRV => {
-                    try host.appendSlice(record.data.service.target);
-                    port = record.data.service.port;
+                    try host.appendSlice(record.data.srv.target);
+                    port = record.data.srv.port;
                 },
                 else => {},
             }
