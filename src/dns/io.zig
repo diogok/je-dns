@@ -90,17 +90,17 @@ const Pack2 = std.PackedIntSliceEndian(u32, .big);
 
 pub fn readMessage(allocator: std.mem.Allocator, reader0: anytype) !data.Message {
     // read all of the request, because we might need the all bytes for pointer/compressed labels
-    const bytes = try reader0.readAllAlloc(allocator, 4096);
-    defer allocator.free(bytes);
+    const all_bytes = try reader0.readAllAlloc(allocator, 4096);
+    defer allocator.free(all_bytes);
 
-    var stream = std.io.fixedBufferStream(bytes);
+    var stream = std.io.fixedBufferStream(all_bytes);
     var reader = stream.reader();
 
     var header_buffer: [12]u8 = undefined;
     _ = try reader.read(&header_buffer);
 
     const header = readHeader(header_buffer[0..]);
-    const questions = try readQuestions(allocator, header.number_of_questions, reader, bytes);
+    const questions = try readQuestions(allocator, header.number_of_questions, reader, all_bytes);
     errdefer {
         for (questions) |q| {
             allocator.free(q.name);
@@ -108,7 +108,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader0: anytype) !data.Message
         allocator.free(questions);
     }
 
-    const records = try readRecords(allocator, header.number_of_answers, reader, bytes);
+    const records = try readRecords(allocator, header.number_of_answers, reader, all_bytes);
     errdefer {
         for (records) |r| {
             r.deinit(allocator);
@@ -116,7 +116,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader0: anytype) !data.Message
         allocator.free(records);
     }
 
-    const authority_records = try readRecords(allocator, header.number_of_authority_resource_records, reader, bytes);
+    const authority_records = try readRecords(allocator, header.number_of_authority_resource_records, reader, all_bytes);
     errdefer {
         for (authority_records) |r| {
             r.deinit(allocator);
@@ -124,7 +124,7 @@ pub fn readMessage(allocator: std.mem.Allocator, reader0: anytype) !data.Message
         allocator.free(authority_records);
     }
 
-    const additional_records = try readRecords(allocator, header.number_of_additional_resource_records, reader, bytes);
+    const additional_records = try readRecords(allocator, header.number_of_additional_resource_records, reader, all_bytes);
     errdefer {
         for (additional_records) |r| {
             r.deinit(allocator);
@@ -247,7 +247,7 @@ fn readHeader(buffer: []u8) data.Header {
 
     return header;
 }
-fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes: []const u8) ![]data.Question {
+fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, all_bytes: []const u8) ![]data.Question {
     var i: usize = 0;
 
     var questions = try allocator.alloc(data.Question, n);
@@ -259,7 +259,7 @@ fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes:
     }
 
     while (i < n) : (i += 1) {
-        const name = try readName(allocator, reader, bytes);
+        const name = try readName(allocator, reader, all_bytes);
         errdefer allocator.free(name);
 
         var q_buffer: [4]u8 = undefined;
@@ -279,7 +279,7 @@ fn readQuestions(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes:
     return questions;
 }
 
-fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes: []const u8) ![]data.Record {
+fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, all_bytes: []const u8) ![]data.Record {
     var i: usize = 0;
 
     var records = try allocator.alloc(data.Record, n);
@@ -291,7 +291,7 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes: [
     }
 
     while (i < n) : (i += 1) {
-        const name = try readName(allocator, reader, bytes);
+        const name = try readName(allocator, reader, all_bytes);
         errdefer allocator.free(name);
 
         var r_buffer: [10]u8 = undefined;
@@ -314,7 +314,7 @@ fn readRecords(allocator: std.mem.Allocator, n: usize, reader: anytype, bytes: [
         defer allocator.free(extra_bytes);
         _ = try reader.read(extra_bytes);
 
-        const extra = try readRecordData(allocator, resource_type, extra_bytes, bytes);
+        const extra = try readRecordData(allocator, resource_type, extra_bytes, all_bytes);
 
         const record = data.Record{
             .resource_type = resource_type,
@@ -334,7 +334,7 @@ fn readRecordData(
     allocator: std.mem.Allocator,
     resource_type: data.ResourceType,
     data_bytes: anytype,
-    bytes: []const u8,
+    all_bytes: []const u8,
 ) !data.RecordData {
     var stream = std.io.fixedBufferStream(data_bytes);
     var reader = stream.reader();
@@ -348,7 +348,7 @@ fn readRecordData(
             return .{ .ip = addr };
         },
         .PTR => {
-            return .{ .raw = try readName(allocator, reader, bytes) };
+            return .{ .ptr = try readName(allocator, reader, all_bytes) };
         },
         .SRV => {
             const pack = Pack.init(data_bytes, 3);
@@ -356,7 +356,7 @@ fn readRecordData(
             const priority = pack.get(1);
             const port = pack.get(2);
 
-            const target = try readName(allocator, reader, bytes);
+            const target = try readName(allocator, reader, all_bytes);
 
             return .{
                 .srv = .{
@@ -496,7 +496,7 @@ fn logRecord(logfn: anytype, r: data.Record) void {
             logfn("│ ==> Data (IP): {any}", .{r.data.ip});
         },
         .PTR => {
-            logfn("│ ==> Data (string): {str}", .{r.data.raw});
+            logfn("│ ==> Data (string): {str}", .{r.data.ptr});
         },
         .TXT => {
             logfn("│ ==> Data (text): {d}", .{r.data.txt.len});

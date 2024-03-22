@@ -127,6 +127,7 @@ pub const RecordData = union(enum) {
         target: []const u8,
     },
     txt: [][]const u8,
+    ptr: []const u8,
     raw: []const u8,
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
@@ -140,6 +141,9 @@ pub const RecordData = union(enum) {
                     allocator.free(txt);
                 }
                 allocator.free(text);
+            },
+            .ptr => |ptr| {
+                allocator.free(ptr);
             },
             .raw => |bytes| {
                 allocator.free(bytes);
