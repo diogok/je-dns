@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const testing = std.testing;
 
 pub const Message = struct {
     header: Header = Header{},
@@ -7,6 +8,46 @@ pub const Message = struct {
     records: []const Record = &[_]Record{},
     authority_records: []const Record = &[_]Record{},
     additional_records: []const Record = &[_]Record{},
+
+    pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
+        const header = try Header.read(stream);
+
+        const questions = try readAll(allocator, stream, Question, header.number_of_questions);
+        errdefer deinitAll(allocator, questions);
+
+        const records = try readAll(allocator, stream, Record, header.number_of_answers);
+        errdefer deinitAll(allocator, records);
+
+        const authority_records = try readAll(allocator, stream, Record, header.number_of_authority_resource_records);
+        errdefer deinitAll(allocator, authority_records);
+
+        const additional_records = try readAll(allocator, stream, Record, header.number_of_additional_resource_records);
+        errdefer deinitAll(allocator, additional_records);
+
+        return @This(){
+            .header = header,
+            .questions = questions,
+            .records = records,
+            .authority_records = authority_records,
+            .additional_records = additional_records,
+        };
+    }
+
+    pub fn writeTo(self: @This(), stream: anytype) !void {
+        try self.header.writeTo(stream);
+        for (self.questions) |question| {
+            try question.writeTo(stream);
+        }
+        for (self.records) |record| {
+            try record.writeTo(stream);
+        }
+        for (self.authority_records) |record| {
+            try record.writeTo(stream);
+        }
+        for (self.additional_records) |record| {
+            try record.writeTo(stream);
+        }
+    }
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         for (self.questions) |q| {
@@ -39,9 +80,9 @@ pub const Header = packed struct {
     number_of_authority_resource_records: u16 = 0,
     number_of_additional_resource_records: u16 = 0,
 
-    pub fn read(stream: anytype) !Header {
+    pub fn read(stream: anytype) !@This() {
         var reader = stream.reader();
-        return Header{
+        return @This(){
             .ID = try reader.readInt(u16, .big),
             .flags = try Flags.read(reader),
             .number_of_questions = try reader.readInt(u16, .big),
@@ -49,6 +90,16 @@ pub const Header = packed struct {
             .number_of_authority_resource_records = try reader.readInt(u16, .big),
             .number_of_additional_resource_records = try reader.readInt(u16, .big),
         };
+    }
+
+    pub fn writeTo(self: @This(), stream: anytype) !void {
+        var writer = stream.writer();
+        try writer.writeInt(u16, self.ID, .big);
+        try writer.writeInt(u16, @bitCast(self.flags), .big);
+        try writer.writeInt(u16, self.number_of_questions, .big);
+        try writer.writeInt(u16, self.number_of_answers, .big);
+        try writer.writeInt(u16, self.number_of_authority_resource_records, .big);
+        try writer.writeInt(u16, self.number_of_additional_resource_records, .big);
     }
 };
 
@@ -91,6 +142,13 @@ pub const Question = struct {
         };
     }
 
+    pub fn writeTo(self: @This(), stream: anytype) !void {
+        var writer = stream.writer();
+        try writeName(writer, self.name);
+        try writer.writeInt(u16, @intFromEnum(self.resource_type), .big);
+        try writer.writeInt(u16, @intFromEnum(self.resource_class), .big);
+    }
+
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.name);
     }
@@ -124,6 +182,15 @@ pub const Record = struct {
             .name = name,
             .data = extra,
         };
+    }
+
+    pub fn writeTo(self: @This(), stream: anytype) !void {
+        var writer = stream.writer();
+        try writeName(writer, self.name);
+        try writer.writeInt(u16, @intFromEnum(self.resource_type), .big);
+        try writer.writeInt(u16, @intFromEnum(self.resource_class), .big);
+        try writer.writeInt(u32, self.ttl, .big);
+        try self.data.writeTo(stream);
     }
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
@@ -206,6 +273,12 @@ pub const RecordData = union(enum) {
         }
     }
 
+    pub fn writeTo(_: @This(), stream: anytype) !void {
+        var writer = stream.writer();
+        try writer.writeInt(u16, 0, .big);
+        // TODO: writer for Resource data
+    }
+
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         switch (self) {
             .ip => {},
@@ -259,6 +332,32 @@ fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
     }
 
     return try name_buffer.toOwnedSlice();
+}
+
+fn writeName(writer: anytype, name: []const u8) !void {
+    var labels_iter = std.mem.splitScalar(u8, name, '.');
+    while (labels_iter.next()) |label| {
+        const len: u8 = @truncate(label.len);
+        _ = try writer.writeByte(len);
+        _ = try writer.write(label);
+    }
+    _ = try writer.writeByte(0);
+}
+
+test "Write a name" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    const writer = stream.writer();
+
+    try writeName(writer, "example.com");
+    var written = stream.getWritten();
+    try testing.expectEqualStrings("\x07example\x03com\x00", written);
+
+    stream.reset();
+
+    try writeName(writer, "www.example.com");
+    written = stream.getWritten();
+    try testing.expectEqualStrings("\x03www\x07example\x03com\x00", written);
 }
 
 pub const QueryOrReply = enum(u1) { query, reply };
@@ -364,4 +463,116 @@ pub fn deinitAll(allocator: std.mem.Allocator, data: anytype) void {
         d.deinit(allocator);
     }
     allocator.free(data);
+}
+
+test "Write a message" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    var message = Message{};
+    message.questions = &[_]Question{
+        .{
+            .name = "example.com",
+            .resource_type = .A,
+        },
+    };
+    message.header.flags.recursion_available = true;
+    message.header.flags.recursion_desired = true;
+    message.header.number_of_questions = 1;
+
+    try message.writeTo(&stream);
+
+    const written = stream.getWritten();
+    const example_query = [_]u8{
+        0, 0, // skip id because it is generated
+        1, 128, // flags: u16  = 110000000
+        0, 1, //  number of questions :u16 = 1
+        0, 0, 0, 0, 0, 0, //  other "number of"
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // question type = A, class = IN
+    };
+    try testing.expectEqualSlices(u8, example_query[2..], written[2..]);
+}
+
+test "Read a message" {
+    const buffer = [_]u8{
+        1, 0, // ID
+        0b10100001, 0b10000000, // flags
+        0, 1, //  number of questions  = 1
+        0, 2, // number of answers = 1
+        0, 1, // number of authority answers = 1
+        0, 1, // number of additional records = 1
+        //  question
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        // record
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        0b11000000, 20, // last label of name is a pointer
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        1, 2, 3, 4, // data
+        // record
+        3, 'w', 'w', 'w', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        4, 3, 2, 1, // data
+        // authority record
+        3, 'w', 'w', '2', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        4, 3, 2, 1, // data
+        // additional record
+        3, 'w', 'w', '1', // first label of name
+        0b11000000, 29, // last label of name is a pointer recur
+        //3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // type = A, class = IN
+        1, 0, 1, 0, // ttl = 16777472
+        0, 4, // length
+        4, 3, 2, 1, // data
+    };
+
+    var stream = std.io.fixedBufferStream(buffer[0..]);
+
+    const reply = try Message.read(testing.allocator, &stream);
+    defer reply.deinit(testing.allocator);
+
+    try testing.expectEqual(reply.header.ID, 256);
+    try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
+    try testing.expectEqual(reply.header.flags.recursion_desired, true);
+    try testing.expectEqual(reply.header.flags.recursion_available, true);
+    try testing.expectEqual(reply.header.flags.response_code, .no_error);
+    try testing.expectEqual(reply.header.number_of_questions, 1);
+    try testing.expectEqual(reply.header.number_of_answers, 2);
+    try testing.expectEqual(reply.questions.len, 1);
+    try testing.expectEqual(reply.records.len, 2);
+    try testing.expectEqual(reply.authority_records.len, 1);
+    try testing.expectEqual(reply.additional_records.len, 1);
+
+    try testing.expectEqualStrings(reply.questions[0].name, "example.com");
+    try testing.expectEqual(reply.questions[0].resource_type, ResourceType.A);
+    try testing.expectEqual(reply.questions[0].resource_class, ResourceClass.IN);
+
+    try testing.expectEqualStrings(reply.records[0].name, "example.com");
+    try testing.expectEqual(reply.records[0].resource_type, ResourceType.A);
+    try testing.expectEqual(reply.records[0].resource_class, ResourceClass.IN);
+    try testing.expectEqual(reply.records[0].ttl, 16777472);
+
+    const ip1234 = try std.net.Address.parseIp("1.2.3.4", 0);
+    try testing.expect(reply.records[0].data.ip.eql(ip1234));
+
+    try testing.expectEqualStrings(reply.records[1].name, "www.example.com");
+    const ip4321 = try std.net.Address.parseIp("4.3.2.1", 0);
+    try testing.expect(reply.records[1].data.ip.eql(ip4321));
+
+    try testing.expectEqualStrings(reply.authority_records[0].name, "ww2.example.com");
+    try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
 }
