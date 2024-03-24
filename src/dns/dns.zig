@@ -43,14 +43,10 @@ pub fn query(
     defer allocator.free(servers);
 
     servers: for (servers) |addr| {
-        var socket = try net.Socket.init(
-            allocator,
-            addr,
-            options.socket_options,
-        );
+        var socket = try net.Socket.init(addr, options.socket_options);
         defer socket.deinit();
 
-        try message.writeTo(&socket.stream);
+        try message.writeTo(socket.stream());
         try socket.send();
 
         var i: usize = 0;
