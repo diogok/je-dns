@@ -3,149 +3,91 @@ const builtin = @import("builtin");
 
 const testing = std.testing;
 
+pub const Stream = std.io.FixedBufferStream([]u8);
+
+pub const SocketOptions = struct {
+    socket_type: enum(u32) {
+        UDP = std.os.SOCK.DGRAM,
+        TCP = std.os.SOCK.STREAM,
+    } = .UDP,
+    timeout_in_millis: i32 = 1000,
+    buffer_size: usize = 0, // 0 means auto
+};
+
 pub const Socket = struct {
+    allocator: std.mem.Allocator,
+
     address: std.net.Address,
     handle: std.os.socket_t,
 
-    buffer: [512]u8 = undefined,
-    pos: usize = 0,
-    len: usize = 0,
+    recv_buffer: []u8,
+    send_buffer: []u8,
+    stream: Stream,
 
-    pub fn init(address: std.net.Address) !@This() {
-        const handle = try std.os.socket(address.any.family, std.os.SOCK.DGRAM, 0);
+    pub fn init(allocator: std.mem.Allocator, address: std.net.Address, options: SocketOptions) !@This() {
+        const handle = try std.os.socket(
+            address.any.family,
+            @intFromEnum(options.socket_type),
+            0,
+        );
+
+        try setTimeout(handle, options.timeout_in_millis);
+
+        // TODO: check system packet size
+        const recv_buffer = try allocator.alloc(u8, 512);
+        const send_buffer = try allocator.alloc(u8, 512);
+        const stream = std.io.fixedBufferStream(send_buffer);
+
         return @This(){
+            .allocator = allocator,
             .address = address,
             .handle = handle,
+            .recv_buffer = recv_buffer,
+            .send_buffer = send_buffer,
+            .stream = stream,
         };
     }
 
     pub fn deinit(self: *@This()) void {
         std.os.close(self.handle);
-    }
-
-    pub fn bind(self: *@This()) !void {
-        try std.os.bind(self.handle, &self.address.any, self.address.getOsSockLen());
+        self.allocator.free(self.recv_buffer);
+        self.allocator.free(self.send_buffer);
     }
 
     pub fn connect(self: *@This()) !void {
         try std.os.connect(self.handle, &self.address.any, self.address.getOsSockLen());
     }
 
-    pub fn reset(self: *@This()) void {
-        self.buffer = std.mem.zeroes(@TypeOf(self.buffer));
-        self.pos = 0;
-        self.len = 0;
+    pub fn bind(self: *@This()) !void {
+        try enableReuse(self.handle);
+        try std.os.bind(self.handle, &self.address.any, self.address.getOsSockLen());
     }
 
-    pub fn send(self: *@This()) !usize {
-        const bytes = self.buffer[0..self.len];
-        const len = try std.os.send(self.handle, bytes, 0);
-        self.reset();
-        return len;
+    pub fn multicast(self: *@This(), mc_address: std.net.Address) !void {
+        try setupMulticast(self.handle, mc_address);
+        try addMembership(self.handle, mc_address);
     }
 
-    pub fn sendTo(self: *@This(), address: std.net.Address) !usize {
-        const bytes = self.buffer[0..self.len];
-        const len = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
-        self.reset();
-        return len;
+    pub fn send(self: *@This()) !void {
+        const bytes = self.stream.getWritten();
+        _ = try std.os.send(self.handle, bytes, 0);
+        self.stream.reset();
     }
 
-    pub fn writer(self: *@This()) std.io.AnyWriter {
-        return .{
-            .context = self,
-            .writeFn = write,
-        };
+    pub fn sendTo(self: *@This(), address: std.net.Address) !void {
+        const bytes = self.stream.getWritten();
+        _ = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
+        self.stream.reset();
     }
 
-    pub fn write(context: *const anyopaque, buffer: []const u8) anyerror!usize {
-        const self: *@This() = @constCast(@ptrCast(@alignCast(context)));
-
-        if (self.len == self.buffer.len) {
-            return 0;
-        }
-
-        const len = @min(buffer.len, self.buffer.len - self.len);
-        const end = @min(len, self.buffer.len) + self.len;
-        std.mem.copyForwards(u8, self.buffer[self.len..end], buffer[0..len]);
-
-        self.len += len;
-
-        return len;
-    }
-
-    pub fn reader(self: *@This()) std.io.AnyReader {
-        return .{
-            .context = self,
-            .readFn = read,
-        };
-    }
-
-    pub fn receive(self: *@This()) ![]const u8 {
-        self.reset();
-        const len = try std.os.recv(self.handle, &self.buffer, 0);
-        self.len = len;
-        return self.buffer[0..len];
-    }
-
-    pub fn read(context: *const anyopaque, buffer: []u8) anyerror!usize {
-        const self: *@This() = @constCast(@ptrCast(@alignCast(context)));
-
-        if (self.pos == self.len) {
-            return 0;
-        }
-
-        const len = @min(buffer.len, self.len - self.pos);
-        const end = @min(len, self.len) + self.pos;
-        std.mem.copyForwards(u8, buffer, self.buffer[self.pos..end]);
-
-        self.pos += len;
-
-        return len;
+    pub fn receive(self: *@This()) !Stream {
+        const len = try std.os.recv(self.handle, self.recv_buffer, 0);
+        return std.io.fixedBufferStream(self.recv_buffer[0..len]);
     }
 };
 
-test "Socket read and write" {
-    const addr = try std.net.Address.parseIp("127.0.0.1", 5353);
-    var socket = try Socket.init(addr);
-    defer socket.deinit();
-
-    const writer = socket.writer();
-
-    const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-
-    var len = try writer.write(data[0..5]);
-    try testing.expectEqual(len, 5);
-    len = try writer.write(data[5..10]);
-    try testing.expectEqual(len, 5);
-    len = try writer.write(data[10..]);
-    try testing.expectEqual(len, 2);
-
-    const reader = socket.reader();
-
-    const d0 = [_]u8{ 1, 2, 3, 4, 5 };
-    const d1 = [_]u8{ 6, 7, 8, 9, 10 };
-    const d2 = [_]u8{ 11, 12 };
-
-    var buffer: [5]u8 = undefined;
-    len = try reader.read(&buffer);
-    try testing.expectEqual(len, 5);
-    try testing.expectEqualSlices(u8, &d0, buffer[0..len]);
-
-    len = try reader.read(&buffer);
-    try testing.expectEqual(len, 5);
-    try testing.expectEqualSlices(u8, &d1, buffer[0..len]);
-
-    len = try reader.read(&buffer);
-    try testing.expectEqual(len, 2);
-    try testing.expectEqualSlices(u8, &d2, buffer[0..len]);
-
-    len = try reader.read(&buffer);
-    try testing.expectEqual(len, 0);
-}
-
-pub fn setTimeout(fd: std.os.socket_t) !void {
-    const micros: i32 = 0.2 * 1000000;
+pub fn setTimeout(fd: std.os.socket_t, millis: i32) !void {
+    const micros: i32 = millis * 1000;
     if (micros > 0) {
         var timeout: std.os.timeval = undefined;
         timeout.tv_sec = @as(c_long, @intCast(@divTrunc(micros, 1000000)));
@@ -185,7 +127,6 @@ pub fn enableReuse(sock: std.os.socket_t) !void {
 pub fn setupMulticast(sock: std.os.socket_t, address: std.net.Address) !void {
     switch (address.any.family) {
         std.os.AF.INET => {
-            //const any = std.net.Address.parseIp4("224.0.0.251", 5353) catch unreachable;
             const any = std.net.Address.parseIp4("0.0.0.0", 5353) catch unreachable;
             try std.os.setsockopt(
                 sock,
@@ -249,7 +190,6 @@ pub fn addMembership(sock: std.os.socket_t, address: std.net.Address) !void {
             );
         },
         std.os.AF.INET6 => {
-            //const mdnsAddr = std.net.Address.parseIp6("ff02::fb", 5353) catch unreachable;
             const membership = extern struct {
                 addr: [16]u8,
                 index: c_uint,

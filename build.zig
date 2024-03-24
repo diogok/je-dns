@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
             .name = "dns-query",
             .target = target,
             .optimize = optimize,
-            .root_source_file = .{ .path = "src/bin/dns_query.zig" },
+            .root_source_file = .{ .path = "src/bin/query.zig" },
             .link_libc = target.result.os.tag == .windows,
         });
         exe.root_module.addImport("dns", dns);

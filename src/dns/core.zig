@@ -1,14 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const testing = std.testing;
-
-const io = @import("io.zig");
+const udp = @import("socket.zig");
 const data = @import("data.zig");
-const udp = @import("udp.zig");
 const nsservers = @import("nsservers.zig");
-
-const log = std.log.scoped(.with_dns);
 
 pub const Options = struct {};
 
@@ -39,22 +34,18 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
 
     const servers = try nsservers.getDNSServers(allocator);
     defer allocator.free(servers);
+
     for (servers) |address| {
-        log.debug("Trying address: {any}", .{address});
-
-        var socket = try udp.Socket.init(address);
+        var socket = try udp.Socket.init(allocator, address, .{});
         defer socket.deinit();
-
-        try udp.setTimeout(socket.handle);
         try socket.connect();
-        log.info("Connected to {any}", .{address});
 
-        try io.writeMessage(socket.writer(), message);
+        try message.writeTo(&socket.stream);
 
-        _ = try socket.send();
-        _ = try socket.receive();
+        try socket.send();
+        var stream = try socket.receive();
 
-        const reply = try io.readMessage(allocator, socket.reader());
+        const reply = try data.Message.read(allocator, &stream);
 
         var replies = try allocator.alloc(data.Message, 1);
         replies[0] = reply;
@@ -65,12 +56,7 @@ fn queryDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !
         };
     }
 
-    const result = Result{
-        .allocator = allocator,
-        .query = message,
-        .replies = &[_]data.Message{},
-    };
-    return result;
+    return error.NoAnswer;
 }
 
 fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) !Result {
@@ -92,43 +78,32 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
     const ip6_any = try std.net.Address.parseIp("::", 5353);
     const ip6_mdns = try std.net.Address.parseIp("ff02::fb", 5353);
 
-    var ip6_socket = try udp.Socket.init(ip6_any);
+    var ip6_socket = try udp.Socket.init(allocator, ip6_any, .{});
     defer ip6_socket.deinit();
 
     const ip4_mdns = try std.net.Address.parseIp("224.0.0.251", 5353);
 
-    var ip4_socket = try udp.Socket.init(ip4_mdns);
+    var ip4_socket = try udp.Socket.init(allocator, ip4_mdns, .{});
     defer ip4_socket.deinit();
 
-    {
-        try udp.setTimeout(ip6_socket.handle);
-        try udp.setTimeout(ip4_socket.handle);
+    try ip6_socket.bind();
+    try ip4_socket.bind();
 
-        try udp.enableReuse(ip6_socket.handle);
-        try udp.enableReuse(ip4_socket.handle);
+    try ip6_socket.multicast(ip4_mdns);
+    try ip4_socket.multicast(ip4_mdns);
 
-        try ip6_socket.bind();
-        try ip4_socket.bind();
+    try message.writeTo(&ip6_socket.stream);
+    try ip6_socket.sendTo(ip6_mdns);
 
-        try udp.addMembership(ip6_socket.handle, ip4_mdns);
-        try udp.addMembership(ip4_socket.handle, ip4_mdns);
-
-        try udp.setupMulticast(ip6_socket.handle, ip6_mdns);
-        try udp.setupMulticast(ip4_socket.handle, ip4_mdns);
-    }
-
-    try io.writeMessage(ip6_socket.writer(), message);
-    _ = try ip6_socket.sendTo(ip6_mdns);
-
-    try io.writeMessage(ip4_socket.writer(), message);
-    _ = try ip4_socket.sendTo(ip4_mdns);
+    try message.writeTo(&ip4_socket.stream);
+    try ip4_socket.sendTo(ip4_mdns);
 
     var i: u8 = 0;
     const attempts: u8 = 8;
     const sockets = [_]*udp.Socket{ &ip6_socket, &ip4_socket };
     while (i < attempts) : (i += 1) {
         for (sockets) |socket| {
-            _ = socket.receive() catch |err| {
+            var stream = socket.receive() catch |err| {
                 switch (err) {
                     error.WouldBlock => {
                         continue;
@@ -139,10 +114,9 @@ fn queryMDNS(allocator: std.mem.Allocator, question: data.Question, _: Options) 
                 }
             };
 
-            const msg = io.readMessage(allocator, socket.reader()) catch |err| {
+            const msg = data.Message.read(allocator, &stream) catch |err| {
                 switch (err) {
                     error.EndOfStream => {
-                        log.warn("Skipping message due to EndOfStream.", .{});
                         continue;
                     },
                     else => {
@@ -196,12 +170,3 @@ pub const Result = struct {
         self.allocator.free(self.replies);
     }
 };
-
-pub const logMessage = io.logMessage;
-
-pub fn logResult(logfn: anytype, result: Result) void {
-    logMessage(logfn, result.query);
-    for (result.replies) |r| {
-        logMessage(logfn, r);
-    }
-}
