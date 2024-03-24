@@ -9,7 +9,7 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    const result = try dns.query(allocator, .{ .name = "example.com", .resource_type = .A }, .{});
+    const result = try dns.query(allocator, "example.com", .A, .{});
     defer result.deinit();
 
     dnslog.logMessage(log.info, result.query);

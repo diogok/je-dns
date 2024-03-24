@@ -5,7 +5,7 @@ const testing = std.testing;
 
 const log = std.log.scoped(.with_dns);
 
-pub fn getDNSServers(allocator: std.mem.Allocator) ![]std.net.Address {
+pub fn getNameservers(allocator: std.mem.Allocator) ![]std.net.Address {
     if (builtin.os.tag == .windows) {
         return try get_windows_dns_servers(allocator);
     } else {

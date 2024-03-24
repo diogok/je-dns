@@ -10,5 +10,5 @@ test "all" {
     _ = @import("data.zig");
     _ = @import("core.zig");
     _ = @import("dns_sd.zig");
-    _ = @import("nsservers.zig");
+    _ = @import("nservers.zig");
 }
