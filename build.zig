@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/dns.zig" } });
+    const dns_sd = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/dns_sd.zig" } });
+    _ = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/socket.zig" } });
 
     {
         const tests = b.addTest(.{
@@ -63,7 +65,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = .{ .path = "src/bin/service_list.zig" },
             .link_libc = target.result.os.tag == .windows,
         });
-        exe.root_module.addImport("dns", dns);
+        exe.root_module.addImport("dns_sd", dns_sd);
 
         b.installArtifact(exe);
 

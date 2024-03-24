@@ -1,8 +1,6 @@
 const std = @import("std");
-const os = std.os;
-
 const dns = @import("dns");
-const dnslog = @import("log.zig");
+const dnslog = @import("dnslog.zig");
 
 const log = std.log.scoped(.query_with_me);
 

@@ -1,12 +1,11 @@
 const std = @import("std");
-const core = @import("core.zig");
-const data = @import("data.zig");
+const dns = @import("dns.zig");
 
 pub fn listLocalServices(allocator: std.mem.Allocator) !ServiceList {
     var services = std.ArrayList([]const u8).init(allocator);
 
-    const result = try core.query(allocator, "_services._dns-sd._udp.local", .PTR, .{});
-    defer data.deinitAll(allocator, result);
+    const result = try dns.query(allocator, "_services._dns-sd._udp.local", .PTR, .{});
+    defer dns.deinitAll(allocator, result);
 
     for (result) |reply| {
         records: for (reply.records) |record| {
@@ -41,8 +40,8 @@ pub const ServiceList = struct {
 pub fn listDetailedServices(allocator: std.mem.Allocator, qname: []const u8) !DetailedServiceList {
     var services = std.ArrayList(DetailedService).init(allocator);
 
-    const result = try core.query(allocator, qname, .PTR, .{});
-    defer data.deinitAll(allocator, result);
+    const result = try dns.query(allocator, qname, .PTR, .{});
+    defer dns.deinitAll(allocator, result);
 
     replies: for (result) |reply| {
         const service_name = name_blk: {

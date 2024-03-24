@@ -1,7 +1,5 @@
 const std = @import("std");
-const os = std.os;
-
-const dns = @import("dns");
+const dns_sd = @import("dns_sd");
 
 const log = std.log.scoped(.discover_with_me);
 
@@ -10,13 +8,13 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    const result = try dns.listLocalServices(allocator);
+    const result = try dns_sd.listLocalServices(allocator);
     defer result.deinit();
 
     for (result.services) |service| {
         log.info("Service found: {s}", .{service});
 
-        const service_details = try dns.listDetailedServices(allocator, service);
+        const service_details = try dns_sd.listDetailedServices(allocator, service);
         defer service_details.deinit();
         for (service_details.services) |srv| {
             log.info("=> Name: {s}", .{srv.name});
