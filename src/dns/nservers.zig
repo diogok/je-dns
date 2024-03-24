@@ -13,6 +13,13 @@ pub fn getNameservers(allocator: std.mem.Allocator) ![]std.net.Address {
     }
 }
 
+pub fn getMulticast(allocator: std.mem.Allocator) ![]std.net.Address {
+    const addresses = try allocator.alloc(std.net.Address, 2);
+    addresses[0] = try std.net.Address.parseIp("ff02::fb", 5353);
+    addresses[1] = try std.net.Address.parseIp("224.0.0.251", 5353);
+    return addresses;
+}
+
 // Resolv.conf
 
 fn get_resolvconf_dns_servers(allocator: std.mem.Allocator) ![]std.net.Address {

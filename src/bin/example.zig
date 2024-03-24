@@ -10,10 +10,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const result = try dns.query(allocator, "example.com", .A, .{});
-    defer result.deinit();
+    defer dns.deinitAll(allocator, result);
 
-    dnslog.logMessage(log.info, result.query);
-    for (result.replies) |r| {
+    for (result) |r| {
         dnslog.logMessage(log.info, r);
     }
 }

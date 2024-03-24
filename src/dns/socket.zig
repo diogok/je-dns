@@ -127,7 +127,7 @@ pub fn enableReuse(sock: std.os.socket_t) !void {
 pub fn setupMulticast(sock: std.os.socket_t, address: std.net.Address) !void {
     switch (address.any.family) {
         std.os.AF.INET => {
-            const any = std.net.Address.parseIp4("0.0.0.0", 5353) catch unreachable;
+            const any = try getAny(address);
             try std.os.setsockopt(
                 sock,
                 std.os.SOL.IP,
@@ -174,7 +174,7 @@ pub fn setupMulticast(sock: std.os.socket_t, address: std.net.Address) !void {
 pub fn addMembership(sock: std.os.socket_t, address: std.net.Address) !void {
     switch (address.any.family) {
         std.os.AF.INET => {
-            const any = std.net.Address.parseIp4("0.0.0.0", 5353) catch unreachable;
+            const any = try getAny(address);
             const membership = extern struct {
                 addr: u32,
                 any: u32,
@@ -205,5 +205,19 @@ pub fn addMembership(sock: std.os.socket_t, address: std.net.Address) !void {
             );
         },
         else => {},
+    }
+}
+
+pub fn getAny(address: std.net.Address) !std.net.Address {
+    switch (address.any.family) {
+        std.os.AF.INET => {
+            return try std.net.Address.parseIp4("0.0.0.0", 5353);
+        },
+        std.os.AF.INET6 => {
+            return try std.net.Address.parseIp6("::", 5353);
+        },
+        else => {
+            return error.UnkownAddressFamily;
+        },
     }
 }

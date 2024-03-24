@@ -7,7 +7,7 @@ const nservers = @import("nservers.zig");
 
 pub const Options = struct {};
 
-pub fn query(allocator: std.mem.Allocator, name: []const u8, resource_type: data.ResourceType, options: Options) !Result {
+pub fn query(allocator: std.mem.Allocator, name: []const u8, resource_type: data.ResourceType, options: Options) ![]const data.Message {
     if (isLocal(name)) {
         return try queryMDNS(allocator, name, resource_type, options);
     } else {
@@ -15,11 +15,7 @@ pub fn query(allocator: std.mem.Allocator, name: []const u8, resource_type: data
     }
 }
 
-fn queryDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data.ResourceType, _: Options) !Result {
-    var questions = try allocator.alloc(data.Question, 1);
-    errdefer allocator.free(questions);
-    questions[0] = .{ .name = name, .resource_type = resource_type };
-
+fn queryDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data.ResourceType, _: Options) ![]const data.Message {
     const message = data.Message{
         .header = .{
             .ID = data.mkid(),
@@ -29,7 +25,12 @@ fn queryDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data.
                 .recursion_desired = true,
             },
         },
-        .questions = questions,
+        .questions = &[_]data.Question{
+            .{
+                .name = name,
+                .resource_type = resource_type,
+            },
+        },
     };
 
     const servers = try nservers.getNameservers(allocator);
@@ -49,61 +50,45 @@ fn queryDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data.
 
         var replies = try allocator.alloc(data.Message, 1);
         replies[0] = reply;
-        return Result{
-            .allocator = allocator,
-            .query = message,
-            .replies = replies,
-        };
+        return replies;
     }
 
-    return error.NoAnswer;
+    return &[_]data.Message{};
 }
 
-fn queryMDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data.ResourceType, _: Options) !Result {
+fn queryMDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data.ResourceType, _: Options) ![]const data.Message {
     var replies = std.ArrayList(data.Message).init(allocator);
     defer replies.deinit();
-
-    var questions = try allocator.alloc(data.Question, 1);
-    errdefer allocator.free(questions);
-    questions[0] = .{ .name = name, .resource_type = resource_type };
 
     const message = data.Message{
         .header = .{
             .ID = data.mkid(),
             .number_of_questions = 1,
         },
-        .questions = questions,
+        .questions = &[_]data.Question{
+            .{
+                .name = name,
+                .resource_type = resource_type,
+            },
+        },
     };
 
-    const ip6_any = try std.net.Address.parseIp("::", 5353);
-    const ip6_mdns = try std.net.Address.parseIp("ff02::fb", 5353);
+    const servers = try nservers.getMulticast(allocator);
+    defer allocator.free(servers);
 
-    var ip6_socket = try udp.Socket.init(allocator, ip6_any, .{});
-    defer ip6_socket.deinit();
+    for (servers) |addr| {
+        const addr_any = try udp.getAny(addr);
+        var socket = try udp.Socket.init(allocator, addr_any, .{});
+        defer socket.deinit();
 
-    const ip4_any = try std.net.Address.parseIp("0.0.0.0", 5353);
-    const ip4_mdns = try std.net.Address.parseIp("224.0.0.251", 5353);
+        try socket.bind();
+        try socket.multicast(addr);
 
-    var ip4_socket = try udp.Socket.init(allocator, ip4_any, .{});
-    defer ip4_socket.deinit();
+        try message.writeTo(&socket.stream);
+        try socket.sendTo(addr);
 
-    try ip6_socket.bind();
-    try ip4_socket.bind();
-
-    try ip6_socket.multicast(ip6_mdns);
-    try ip4_socket.multicast(ip4_mdns);
-
-    try message.writeTo(&ip6_socket.stream);
-    try ip6_socket.sendTo(ip6_mdns);
-
-    try message.writeTo(&ip4_socket.stream);
-    try ip4_socket.sendTo(ip4_mdns);
-
-    var i: u8 = 0;
-    const attempts: u8 = 8;
-    const sockets = [_]*udp.Socket{ &ip6_socket, &ip4_socket };
-    while (i < attempts) : (i += 1) {
-        for (sockets) |socket| {
+        var i: usize = 0;
+        while (i < 5) : (i += 1) {
             var stream = socket.receive() catch |err| {
                 switch (err) {
                     error.WouldBlock => {
@@ -115,24 +100,13 @@ fn queryMDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data
                 }
             };
 
-            const msg = data.Message.read(allocator, &stream) catch |err| {
-                switch (err) {
-                    error.EndOfStream => {
-                        continue;
-                    },
-                    else => {
-                        return err;
-                    },
-                }
-            };
+            const msg = try data.Message.read(allocator, &stream);
 
             var keep = false;
             if (msg.header.flags.query_or_reply == .reply) {
                 for (msg.records) |r| {
                     if (std.ascii.eqlIgnoreCase(r.name, name)) {
-                        std.debug.print("Got one from {any}\n", .{socket.address});
                         keep = true;
-                        break;
                     }
                 }
             }
@@ -145,30 +119,9 @@ fn queryMDNS(allocator: std.mem.Allocator, name: []const u8, resource_type: data
         }
     }
 
-    const result = Result{
-        .allocator = allocator,
-        .query = message,
-        .replies = try replies.toOwnedSlice(),
-    };
-    return result;
+    return try replies.toOwnedSlice();
 }
 
 fn isLocal(address: []const u8) bool {
     return std.ascii.endsWithIgnoreCase(address, ".local") or std.ascii.endsWithIgnoreCase(address, ".local.");
 }
-
-pub const Result = struct {
-    allocator: std.mem.Allocator,
-
-    query: data.Message,
-    replies: []data.Message,
-
-    pub fn deinit(self: @This()) void {
-        //self.query.deinit(self.allocator);
-        self.allocator.free(self.query.questions);
-        for (self.replies) |r| {
-            r.deinit(self.allocator);
-        }
-        self.allocator.free(self.replies);
-    }
-};
