@@ -16,9 +16,9 @@ pub fn main() !void {
     for (result.services) |service| {
         log.info("Service found: {s}", .{service});
 
-        const service_list = try dns.listDetailedServices(allocator, service);
-        defer service_list.deinit();
-        for (service_list.services) |srv| {
+        const service_details = try dns.listDetailedServices(allocator, service);
+        defer service_details.deinit();
+        for (service_details.services) |srv| {
             log.info("=> Name: {s}", .{srv.name});
             log.info("=> Host: {s}:{d}", .{ srv.host, srv.port });
             log.info("=> Addresses: {d}", .{srv.addresses.len});

@@ -21,10 +21,9 @@ pub fn main() !void {
     const name: []const u8 = args[1];
     const rtype = std.meta.stringToEnum(dns.ResourceType, args[2]) orelse .A;
     const result = try dns.query(allocator, name, rtype, .{});
-    defer result.deinit();
+    defer dns.deinitAll(allocator, result);
 
-    dnslog.logMessage(log.info, result.query);
-    for (result.replies) |r| {
+    for (result) |r| {
         dnslog.logMessage(log.info, r);
     }
 }

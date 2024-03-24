@@ -1,11 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const testing = std.testing;
-
 pub const Stream = std.io.FixedBufferStream([]u8);
 
-pub const SocketOptions = struct {
+pub const Options = struct {
     socket_type: enum(u32) {
         UDP = std.os.SOCK.DGRAM,
         TCP = std.os.SOCK.STREAM,
@@ -24,7 +22,7 @@ pub const Socket = struct {
     send_buffer: []u8,
     stream: Stream,
 
-    pub fn init(allocator: std.mem.Allocator, address: std.net.Address, options: SocketOptions) !@This() {
+    pub fn init(allocator: std.mem.Allocator, address: std.net.Address, options: Options) !@This() {
         const handle = try std.os.socket(
             address.any.family,
             @intFromEnum(options.socket_type),
@@ -33,10 +31,27 @@ pub const Socket = struct {
 
         try setTimeout(handle, options.timeout_in_millis);
 
-        // TODO: check system packet size
         const recv_buffer = try allocator.alloc(u8, 512);
         const send_buffer = try allocator.alloc(u8, 512);
         const stream = std.io.fixedBufferStream(send_buffer);
+
+        if (isMulticast(address)) {
+            const any_addr = try getAny(address);
+            try enableReuse(handle);
+            try std.os.bind(
+                handle,
+                &any_addr.any,
+                any_addr.getOsSockLen(),
+            );
+            try setupMulticast(handle, address);
+            try addMembership(handle, address);
+        } else {
+            try std.os.connect(
+                handle,
+                &address.any,
+                address.getOsSockLen(),
+            );
+        }
 
         return @This(){
             .allocator = allocator,
@@ -54,29 +69,19 @@ pub const Socket = struct {
         self.allocator.free(self.send_buffer);
     }
 
-    pub fn connect(self: *@This()) !void {
-        try std.os.connect(self.handle, &self.address.any, self.address.getOsSockLen());
-    }
-
-    pub fn bind(self: *@This()) !void {
-        try enableReuse(self.handle);
-        try std.os.bind(self.handle, &self.address.any, self.address.getOsSockLen());
-    }
-
-    pub fn multicast(self: *@This(), mc_address: std.net.Address) !void {
-        try setupMulticast(self.handle, mc_address);
-        try addMembership(self.handle, mc_address);
-    }
-
     pub fn send(self: *@This()) !void {
         const bytes = self.stream.getWritten();
-        _ = try std.os.send(self.handle, bytes, 0);
-        self.stream.reset();
-    }
-
-    pub fn sendTo(self: *@This(), address: std.net.Address) !void {
-        const bytes = self.stream.getWritten();
-        _ = try std.os.sendto(self.handle, bytes, 0, &address.any, address.getOsSockLen());
+        if (isMulticast(self.address)) {
+            _ = try std.os.sendto(
+                self.handle,
+                bytes,
+                0,
+                &self.address.any,
+                self.address.getOsSockLen(),
+            );
+        } else {
+            _ = try std.os.send(self.handle, bytes, 0);
+        }
         self.stream.reset();
     }
 
@@ -85,6 +90,22 @@ pub const Socket = struct {
         return std.io.fixedBufferStream(self.recv_buffer[0..len]);
     }
 };
+
+pub fn isMulticast(address: std.net.Address) bool {
+    switch (address.any.family) {
+        std.os.AF.INET => {
+            const addr = address.in.sa.addr;
+            const bytes = std.mem.toBytes(addr);
+            return bytes[0] & 0xF0 == 0xE0;
+        },
+        std.os.AF.INET6 => {
+            return address.in6.sa.addr[0] >= 0xFF;
+        },
+        else => {
+            return false;
+        },
+    }
+}
 
 pub fn setTimeout(fd: std.os.socket_t, millis: i32) !void {
     const micros: i32 = millis * 1000;

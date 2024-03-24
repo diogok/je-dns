@@ -1,9 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
-
 const testing = std.testing;
 
-const log = std.log.scoped(.with_dns);
+pub fn getNameserversFor(allocator: std.mem.Allocator, name: []const u8) ![]std.net.Address {
+    if (isLocal(name)) {
+        return try getMulticast(allocator);
+    } else {
+        return try getNameservers(allocator);
+    }
+}
 
 pub fn getNameservers(allocator: std.mem.Allocator) ![]std.net.Address {
     if (builtin.os.tag == .windows) {
@@ -117,3 +122,7 @@ const IP_ADDR_STRING = extern struct {
 const IP_ADDRESS_STRING = extern struct {
     String: [16]u8,
 };
+
+fn isLocal(address: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(address, ".local") or std.ascii.endsWithIgnoreCase(address, ".local.");
+}

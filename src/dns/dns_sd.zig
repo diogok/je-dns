@@ -1,15 +1,14 @@
 const std = @import("std");
 const core = @import("core.zig");
-
-const log = std.log.scoped(.with_dns);
+const data = @import("data.zig");
 
 pub fn listLocalServices(allocator: std.mem.Allocator) !ServiceList {
     var services = std.ArrayList([]const u8).init(allocator);
 
-    const result = try core.query(allocator, .{ .name = "_services._dns-sd._udp.local", .resource_type = .PTR }, .{});
-    defer result.deinit();
+    const result = try core.query(allocator, "_services._dns-sd._udp.local", .PTR, .{});
+    defer data.deinitAll(allocator, result);
 
-    for (result.replies) |reply| {
+    for (result) |reply| {
         records: for (reply.records) |record| {
             for (services.items) |existing| {
                 if (std.mem.eql(u8, existing, record.data.ptr)) {
@@ -30,7 +29,6 @@ pub fn listLocalServices(allocator: std.mem.Allocator) !ServiceList {
 
 pub const ServiceList = struct {
     allocator: std.mem.Allocator,
-
     services: [][]const u8,
     pub fn deinit(self: @This()) void {
         for (self.services) |service| {
@@ -43,10 +41,10 @@ pub const ServiceList = struct {
 pub fn listDetailedServices(allocator: std.mem.Allocator, qname: []const u8) !DetailedServiceList {
     var services = std.ArrayList(DetailedService).init(allocator);
 
-    const result = try core.query(allocator, .{ .name = qname, .resource_type = .PTR }, .{});
-    defer result.deinit();
+    const result = try core.query(allocator, qname, .PTR, .{});
+    defer data.deinitAll(allocator, result);
 
-    replies: for (result.replies) |reply| {
+    replies: for (result) |reply| {
         const service_name = name_blk: {
             for (reply.records) |record| {
                 if (std.ascii.eqlIgnoreCase(record.name, qname)) {
