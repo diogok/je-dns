@@ -6,7 +6,7 @@ pub const Stream = std.io.FixedBufferStream([]u8);
 pub const Options = struct {
     socket_type: enum(u32) {
         UDP = std.os.SOCK.DGRAM,
-        TCP = std.os.SOCK.STREAM,
+        //TCP = std.os.SOCK.STREAM,
     } = .UDP,
     timeout_in_millis: i32 = 1000,
     initalize: bool = true,

@@ -42,7 +42,7 @@ pub fn logMessage(logfn: anytype, msg: dns.Message) void {
     logfn("└──────", .{});
 }
 
-fn logRecord(logfn: anytype, r: dns.Record) void {
+pub fn logRecord(logfn: anytype, r: dns.Record) void {
     logfn("│ ==> Name: {s}", .{r.name});
     logfn("│ ==> Resource type: {any}", .{r.resource_type});
     logfn("│ ==> Resource class: {any}", .{r.resource_class});

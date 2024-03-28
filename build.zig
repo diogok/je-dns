@@ -5,8 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const dns = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/dns.zig" } });
-    const dns_sd = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/dns_sd.zig" } });
-    _ = b.addModule("dns", .{ .root_source_file = .{ .path = "src/dns/socket.zig" } });
+    const dns_sd = b.addModule("dns_sd", .{ .root_source_file = .{ .path = "src/dns/dns_sd.zig" } });
+    _ = b.addModule("socket", .{ .root_source_file = .{ .path = "src/dns/socket.zig" } });
 
     {
         const tests = b.addTest(.{
@@ -71,6 +71,23 @@ pub fn build(b: *std.Build) void {
 
         const run_cmd = b.addRunArtifact(exe);
         const run_step = b.step("run-service-list", "Run service list");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    {
+        const exe = b.addExecutable(.{
+            .name = "announcer",
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = .{ .path = "src/bin/announce.zig" },
+            .link_libc = target.result.os.tag == .windows,
+        });
+        exe.root_module.addImport("dns_sd", dns_sd);
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        const run_step = b.step("run-announcer", "Run announcer");
         run_step.dependOn(&run_cmd.step);
     }
 }

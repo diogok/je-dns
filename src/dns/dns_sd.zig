@@ -1,5 +1,6 @@
 const std = @import("std");
 const dns = @import("dns.zig");
+const net = @import("socket.zig");
 
 pub fn listLocalServices(allocator: std.mem.Allocator) !ServiceList {
     var services = std.ArrayList([]const u8).init(allocator);
@@ -136,5 +137,38 @@ pub const DetailedServiceList = struct {
             service.deinit();
         }
         self.allocator.free(self.services);
+    }
+};
+
+pub const Announcer = struct {
+    allocator: std.mem.Allocator,
+    service: []const u8,
+    socket: net.Socket,
+
+    pub fn init(allocator: std.mem.Allocator, name: []const u8) !@This() {
+        const addr = std.net.Address.parseIp6("ff02::fb", 5353) catch unreachable;
+        const socket = try net.Socket.init(addr, .{});
+        return @This(){
+            .allocator = allocator,
+            .socket = socket,
+            .service = name,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.socket.deinit();
+    }
+
+    pub fn handle(self: *@This()) !void {
+        var stream = try self.socket.receive();
+
+        var msg = try dns.Message.read(self.allocator, &stream);
+        defer msg.deinit(self.allocator);
+
+        if (msg.header.flags.query_or_reply == .query) {
+            for (msg.questions) |q| {
+                std.debug.print("Got a question? {s}\n", .{q.name});
+            }
+        }
     }
 };
