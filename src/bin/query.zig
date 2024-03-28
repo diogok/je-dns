@@ -18,10 +18,13 @@ pub fn main() !void {
 
     const name: []const u8 = args[1];
     const rtype = std.meta.stringToEnum(dns.ResourceType, args[2]) orelse .A;
-    const result = try dns.query(allocator, name, rtype, .{});
-    defer dns.deinitAll(allocator, result);
 
-    for (result) |r| {
-        dnslog.logMessage(log.info, r);
+    var client = dns.DNClient.init(allocator, .{});
+    defer client.deinit();
+    try client.query(name, rtype);
+
+    while (try client.next()) |record| {
+        defer record.deinit(allocator);
+        dnslog.logRecord(log.info, record);
     }
 }

@@ -5,138 +5,135 @@ const testing = std.testing;
 const net = @import("socket.zig");
 
 pub const Options = struct {
-    max_records: usize = 0,
-    reads_per_server: usize = 5,
     socket_options: net.Options = .{
         .timeout_in_millis = 200,
     },
 };
 
-pub fn query(
+pub const DNClient = struct {
     allocator: std.mem.Allocator,
-    name: []const u8,
-    resource_type: ResourceType,
     options: Options,
-) !ReplyIterator {
-    const local = isLocal(name);
 
-    const query_message = Message{
-        .header = .{
-            .ID = mkid(),
-            .flags = .{
-                .recursion_available = !local,
-                .recursion_desired = !local,
-            },
-            .number_of_questions = 1,
-        },
-        .questions = &[_]Question{
-            .{
-                .name = name,
-                .resource_type = resource_type,
-            },
-        },
-    };
+    sockets: ?[]*net.Socket = null,
+    stream: ?*net.Stream = null,
+    iter: ?*MessageIterator(*net.Stream) = null,
 
-    return ReplyIterator.init(allocator, query_message, options);
-}
-
-pub const ReplyIterator = struct {
-    allocator: std.mem.Allocator,
-    query_message: Message,
-
-    servers: ?[]const std.net.Address = null,
-    socket: ?*net.Socket = null,
-    stream: ?net.Stream = null,
-    iter: ?MessageIterator(*net.Stream) = null,
-
-    next_server: usize = 0,
-    received: usize = 0,
-    records: usize = 0,
-
-    options: Options,
+    curr: usize = 0,
 
     state: enum {
-        get_servers,
-        select_server,
-        connect,
-        send,
         receive,
+        iter,
         read,
-    } = .get_servers,
+        next_socket,
+    } = .receive,
 
-    pub fn init(allocator: std.mem.Allocator, query_message: Message, options: Options) !@This() {
+    pub fn init(allocator: std.mem.Allocator, options: Options) @This() {
         return @This(){
             .allocator = allocator,
             .options = options,
-            .query_message = query_message,
         };
     }
 
+    pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
+        self.deinit();
+
+        const local = isLocal(name);
+        const message = Message{
+            .header = .{
+                .ID = mkid(),
+                .flags = .{
+                    .recursion_available = !local,
+                    .recursion_desired = !local,
+                },
+                .number_of_questions = 1,
+            },
+            .questions = &[_]Question{
+                .{
+                    .name = name,
+                    .resource_type = resource_type,
+                },
+            },
+        };
+
+        const servers = try getNameservers(self.allocator, name);
+        defer self.allocator.free(servers);
+        if (servers.len == 0) {
+            return error.NoServerToQuery;
+        }
+
+        var sockets = try self.allocator.alloc(*net.Socket, servers.len);
+        errdefer self.allocator.free(sockets);
+        for (servers, 0..) |addr, i| {
+            var socket = try net.Socket.init(addr, self.options.socket_options);
+            try message.writeTo(socket.stream());
+            try socket.send();
+            sockets[i] = try self.allocator.create(net.Socket);
+            sockets[i].* = socket;
+        }
+        self.sockets = sockets;
+    }
+
     pub fn deinit(self: *@This()) void {
-        if (self.socket) |socket| {
-            socket.deinit();
-            self.allocator.destroy(socket);
+        if (self.sockets) |sockets| {
+            for (sockets) |socket| {
+                socket.deinit();
+                self.allocator.destroy(socket);
+            }
+            self.allocator.free(sockets);
         }
-        if (self.servers) |servers| {
-            self.allocator.free(servers);
+
+        if (self.stream) |stream| {
+            self.allocator.destroy(stream);
+            self.stream = null;
         }
+        if (self.iter) |iter| {
+            self.allocator.destroy(iter);
+            self.iter = null;
+        }
+        self.curr = 0;
+        self.state = .receive;
     }
 
     pub fn next(self: *@This()) !?Record {
-        while (true) {
+        var count: u8 = 0;
+        next: while (true) : (count += 1) {
+            if (count >= 9) {
+                return null;
+            }
             switch (self.state) {
-                .get_servers => {
-                    // start by getting available nameservers, it depends if using mDNS or regular DNS
-                    self.servers = try getNameservers(self.allocator, self.query_message.questions[0].name);
-                    self.state = .select_server;
-                },
-                .select_server => {
-                    // select a server to query
-                    if (self.next_server >= self.servers.?.len) {
-                        return null; // No more servers to try
-                    }
-                    self.next_server += 1;
-                    self.state = .connect;
-                },
-                .connect => {
-                    if (self.socket) |socket| {
-                        // deinit old socket if in use
-                        socket.deinit();
-                    }
-                    const socket = try self.allocator.create(net.Socket);
-                    socket.* = try net.Socket.init(
-                        self.servers.?[self.next_server - 1],
-                        self.options.socket_options,
-                    );
-                    self.socket = socket;
-                    self.received = 0; // reset number of received packets from this server
-                    self.state = .send;
-                },
-                .send => {
-                    // send the message, here we can assume there is a socket
-                    try self.query_message.writeTo(self.socket.?.stream());
-                    try self.socket.?.send();
-                    self.state = .receive;
-                },
                 .receive => {
-                    if (self.options.reads_per_server > 0 and self.received >= self.options.reads_per_server) {
-                        // already received max packets per server, go to next server
-                        self.state = .select_server;
+                    if (self.stream) |stream| {
+                        self.allocator.destroy(stream);
+                        self.stream = null;
                     }
-                    self.received += 1;
-                    self.stream = self.socket.?.receive() catch |err| {
-                        std.debug.print("Error: {any}\n", .{err});
-                        // it can fail to receive due to timeout, it can try again
-                        return self.next();
+                    // try to receive a packet form current socket
+                    const stream = self.sockets.?[self.curr].receive() catch |err| {
+                        switch (err) {
+                            error.WouldBlock => {
+                                // timeout, try next
+                                self.state = .next_socket;
+                                continue :next;
+                            },
+                            else => {
+                                return err;
+                            },
+                        }
                     };
-                    self.iter = Message.streamIterator(self.allocator, &self.stream.?);
+                    self.stream = try self.allocator.create(net.Stream);
+                    self.stream.?.* = stream;
+                    self.state = .iter;
+                },
+                .iter => {
+                    if (self.iter) |iter| {
+                        self.allocator.destroy(iter);
+                        self.iter = null;
+                    }
+                    const iter = Message.streamIterator(self.allocator, self.stream.?);
+                    self.iter = try self.allocator.create(MessageIterator(*net.Stream));
+                    self.iter.?.* = iter;
                     self.state = .read;
                 },
                 .read => {
-                    if (self.options.max_records > 0 and self.records >= self.options.max_records) {
-                        // already read mas number of expected records, end of iterator
-                        return null;
-                    }
                     if (try self.iter.?.next()) |section| {
                         // if there a section to read
                         switch (section) {
@@ -154,15 +151,22 @@ pub const ReplyIterator = struct {
                             },
                             .record, .authority_record, .additional_record => |record| {
                                 // return any found record
-                                self.records += 1;
                                 // state will still be read on next call
                                 return record;
                             },
                         }
                     } else {
-                        // there is no more section to read, receive next packet
-                        self.state = .receive;
+                        // there is no more section to read, receive packet on next socket
+                        self.state = .next_socket;
                     }
+                },
+                .next_socket => {
+                    self.curr += 1;
+                    if (self.curr == self.sockets.?.len) {
+                        // if read all sockets, got to begning;
+                        self.curr = 0;
+                    }
+                    self.state = .receive;
                 },
             }
         }
