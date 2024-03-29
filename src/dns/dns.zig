@@ -10,7 +10,7 @@ pub const Options = struct {
     },
 };
 
-pub const DNClient = struct {
+pub const DNSClient = struct {
     allocator: std.mem.Allocator,
     options: Options,
 
@@ -94,7 +94,38 @@ pub const DNClient = struct {
         self.state = .receive;
     }
 
-    pub fn next(self: *@This()) !?Record {
+    pub fn nextRecord(self: *@This()) !?Record {
+        while (try self.next()) |info| {
+            switch (info) {
+                .start_message => {
+                    continue;
+                },
+                .header => |header| {
+                    if (header.flags.query_or_reply == .query) {
+                        self.state = .receive;
+                    }
+                },
+                .question => |question| {
+                    question.deinit(self.allocator);
+                },
+                .record => |record| {
+                    return record;
+                },
+                .end_message => {
+                    continue;
+                },
+            }
+        }
+        return null;
+    }
+
+    pub fn next(self: *@This()) !?union(enum) {
+        start_message: void,
+        header: Header,
+        question: Question,
+        record: Record,
+        end_message: void,
+    } {
         var count: u8 = 0;
         next: while (true) : (count += 1) {
             if (count >= 9) {
@@ -106,7 +137,6 @@ pub const DNClient = struct {
                         self.allocator.destroy(stream);
                         self.stream = null;
                     }
-                    // try to receive a packet form current socket
                     const stream = self.sockets.?[self.curr].receive() catch |err| {
                         switch (err) {
                             error.WouldBlock => {
@@ -132,38 +162,29 @@ pub const DNClient = struct {
                     self.iter = try self.allocator.create(MessageIterator(*net.Stream));
                     self.iter.?.* = iter;
                     self.state = .read;
+                    return .{ .start_message = {} };
                 },
                 .read => {
                     if (try self.iter.?.next()) |section| {
-                        // if there a section to read
                         switch (section) {
                             .header => |header| {
-                                if (header.flags.query_or_reply != .reply) {
-                                    // only consider replies, skip queries
-                                    self.state = .receive;
-                                }
-                                // go to next, state might be receive or read again
+                                return .{ .header = header };
                             },
                             .question => |question| {
-                                // discard question
-                                question.deinit(self.allocator);
-                                // read next
+                                return .{ .question = question };
                             },
                             .record, .authority_record, .additional_record => |record| {
-                                // return any found record
-                                // state will still be read on next call
-                                return record;
+                                return .{ .record = record };
                             },
                         }
                     } else {
-                        // there is no more section to read, receive packet on next socket
                         self.state = .next_socket;
+                        return .{ .end_message = {} };
                     }
                 },
                 .next_socket => {
                     self.curr += 1;
                     if (self.curr == self.sockets.?.len) {
-                        // if read all sockets, got to begning;
                         self.curr = 0;
                     }
                     self.state = .receive;

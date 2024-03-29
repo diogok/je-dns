@@ -9,11 +9,11 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    var client = dns.DNClient.init(allocator, .{});
+    var client = dns.DNSClient.init(allocator, .{});
     defer client.deinit();
     try client.query("example.com", .A);
 
-    if (try client.next()) |record| {
+    if (try client.nextRecord()) |record| {
         defer record.deinit(allocator);
         dnslog.logRecord(log.info, record);
     }
