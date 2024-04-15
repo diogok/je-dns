@@ -155,33 +155,98 @@ pub const DetailedServiceList = struct {
 
 pub const Announcer = struct {
     allocator: std.mem.Allocator,
-    service: []const u8,
-    socket: net.Socket,
+    client: *dns.DNSClient,
+    name: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) !@This() {
-        const addr = std.net.Address.parseIp6("ff02::fb", 5353) catch unreachable;
-        const socket = try net.Socket.init(addr, .{});
+        const client = try allocator.create(dns.DNSClient);
+        client.* = dns.DNSClient.init(allocator, .{});
+        try client.connect(dns.isLocal(name));
+
         return @This(){
             .allocator = allocator,
-            .socket = socket,
-            .service = name,
+            .client = client,
+            .name = name,
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        self.socket.deinit();
+        defer self.client.deinit();
     }
 
     pub fn handle(self: *@This()) !void {
-        var stream = try self.socket.receive();
-
-        var msg = try dns.Message.read(self.allocator, &stream);
-        defer msg.deinit(self.allocator);
-
-        if (msg.header.flags.query_or_reply == .query) {
-            for (msg.questions) |q| {
-                std.debug.print("Got a question? {s}\n", .{q.name});
+        var is_query = false;
+        var id: u16 = 0;
+        while (try self.client.next()) |next| {
+            switch (next) {
+                .start_message => {},
+                .end_message => {
+                    return;
+                },
+                .header => |h| {
+                    is_query = h.flags.query_or_reply == .query;
+                    id = h.ID;
+                },
+                .question => |q| {
+                    defer q.deinit(self.allocator);
+                    if (is_query and q.resource_type == .PTR) {
+                        try self.answer(id, q);
+                    }
+                },
+                .record => |r| {
+                    r.deinit(self.allocator);
+                },
             }
+        }
+    }
+
+    pub fn answer(self: *@This(), id: u16, q: dns.Question) !void {
+        if (std.ascii.eqlIgnoreCase(q.name, "_services._dns-sd._udp.local")) {
+            const response = dns.Message{
+                .header = .{
+                    .ID = id,
+                    .flags = .{
+                        .query_or_reply = .reply,
+                        .authoritative_answer = true,
+                    },
+                    .number_of_answers = 1,
+                },
+                .records = &[_]dns.Record{
+                    .{
+                        .name = q.name,
+                        .resource_type = q.resource_type,
+                        .resource_class = .IN,
+                        .ttl = 600,
+                        .data = .{
+                            .ptr = self.name,
+                        },
+                    },
+                },
+            };
+            try self.client.send(response);
+        } else if (std.ascii.eqlIgnoreCase(q.name, self.name)) {
+            const response = dns.Message{
+                .header = .{
+                    .ID = id,
+                    .flags = .{
+                        .query_or_reply = .reply,
+                        .authoritative_answer = true,
+                    },
+                    .number_of_answers = 1,
+                },
+                .records = &[_]dns.Record{
+                    .{
+                        .name = q.name,
+                        .resource_type = q.resource_type,
+                        .resource_class = .IN,
+                        .ttl = 600,
+                        .data = .{
+                            .ptr = self.name,
+                        },
+                    },
+                },
+            };
+            try self.client.send(response);
         }
     }
 };

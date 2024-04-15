@@ -13,8 +13,8 @@ pub fn main() !void {
     defer client.deinit();
     try client.query("example.com", .A);
 
-    if (try client.nextRecord()) |record| {
-        defer record.deinit(allocator);
-        dnslog.logRecord(log.info, record);
+    if (try client.next()) |message| {
+        defer message.deinit();
+        dnslog.logRecord(log.info, message.records[0]);
     }
 }

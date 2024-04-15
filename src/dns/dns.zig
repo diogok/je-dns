@@ -15,17 +15,7 @@ pub const DNSClient = struct {
     options: Options,
 
     sockets: ?[]*net.Socket = null,
-    stream: ?*net.Stream = null,
-    iter: ?*MessageIterator(*net.Stream) = null,
-
     curr: usize = 0,
-
-    state: enum {
-        receive,
-        iter,
-        read,
-        next_socket,
-    } = .receive,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) @This() {
         return @This(){
@@ -34,10 +24,38 @@ pub const DNSClient = struct {
         };
     }
 
-    pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
+    pub fn connect(self: *@This(), local: bool) !void {
         self.deinit();
 
+        // TODO: this client can only do local or regular dns, not both
+
+        const servers = try getNameservers(self.allocator, local);
+        defer self.allocator.free(servers);
+        if (servers.len == 0) {
+            return error.NoServerFound;
+        }
+
+        var i: usize = 0;
+        var sockets = try self.allocator.alloc(*net.Socket, servers.len);
+        errdefer {
+            for (sockets[0..i]) |sock| {
+                self.allocator.destroy(sock);
+            }
+            self.allocator.free(sockets);
+        }
+        for (servers) |addr| {
+            const socket = try net.Socket.init(addr, self.options.socket_options);
+            sockets[i] = try self.allocator.create(net.Socket);
+            sockets[i].* = socket;
+            i += 1;
+        }
+        self.sockets = sockets;
+    }
+
+    pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
         const local = isLocal(name);
+        if (self.sockets == null) try self.connect(local);
+
         const message = Message{
             .header = .{
                 .ID = mkid(),
@@ -55,22 +73,14 @@ pub const DNSClient = struct {
             },
         };
 
-        const servers = try getNameservers(self.allocator, name);
-        defer self.allocator.free(servers);
-        if (servers.len == 0) {
-            return error.NoServerToQuery;
-        }
+        try self.send(message);
+    }
 
-        var sockets = try self.allocator.alloc(*net.Socket, servers.len);
-        errdefer self.allocator.free(sockets);
-        for (servers, 0..) |addr, i| {
-            var socket = try net.Socket.init(addr, self.options.socket_options);
+    pub fn send(self: *@This(), message: Message) !void {
+        for (self.sockets.?) |socket| {
             try message.writeTo(socket.stream());
             try socket.send();
-            sockets[i] = try self.allocator.create(net.Socket);
-            sockets[i].* = socket;
         }
-        self.sockets = sockets;
     }
 
     pub fn deinit(self: *@This()) void {
@@ -81,121 +91,38 @@ pub const DNSClient = struct {
             }
             self.allocator.free(sockets);
         }
-
-        if (self.stream) |stream| {
-            self.allocator.destroy(stream);
-            self.stream = null;
-        }
-        if (self.iter) |iter| {
-            self.allocator.destroy(iter);
-            self.iter = null;
-        }
         self.curr = 0;
-        self.state = .receive;
     }
 
-    pub fn nextRecord(self: *@This()) !?Record {
-        while (try self.next()) |info| {
-            switch (info) {
-                .start_message => {
-                    continue;
-                },
-                .header => |header| {
-                    if (header.flags.query_or_reply == .query) {
-                        self.state = .receive;
-                    }
-                },
-                .question => |question| {
-                    question.deinit(self.allocator);
-                },
-                .record => |record| {
-                    return record;
-                },
-                .end_message => {
-                    continue;
-                },
+    pub fn next(self: *@This()) !?Message {
+        var count: u8 = 0;
+        while (count <= 9) : (count += 1) {
+            const stream = self.sockets.?[self.curr].receive() catch continue;
+            const message = Message.read(self.allocator, stream) catch continue;
+
+            self.curr += 1;
+            if (self.curr == self.sockets.?.len) {
+                self.curr = 0;
             }
+
+            return message;
         }
         return null;
     }
 
-    pub fn next(self: *@This()) !?union(enum) {
-        start_message: void,
-        header: Header,
-        question: Question,
-        record: Record,
-        end_message: void,
-    } {
-        var count: u8 = 0;
-        next: while (true) : (count += 1) {
-            if (count >= 9) {
-                return null;
-            }
-            switch (self.state) {
-                .receive => {
-                    if (self.stream) |stream| {
-                        self.allocator.destroy(stream);
-                        self.stream = null;
-                    }
-                    const stream = self.sockets.?[self.curr].receive() catch |err| {
-                        switch (err) {
-                            error.WouldBlock => {
-                                // timeout, try next
-                                self.state = .next_socket;
-                                continue :next;
-                            },
-                            else => {
-                                return err;
-                            },
-                        }
-                    };
-                    self.stream = try self.allocator.create(net.Stream);
-                    self.stream.?.* = stream;
-                    self.state = .iter;
-                },
-                .iter => {
-                    if (self.iter) |iter| {
-                        self.allocator.destroy(iter);
-                        self.iter = null;
-                    }
-                    const iter = Message.streamIterator(self.allocator, self.stream.?);
-                    self.iter = try self.allocator.create(MessageIterator(*net.Stream));
-                    self.iter.?.* = iter;
-                    self.state = .read;
-                    return .{ .start_message = {} };
-                },
-                .read => {
-                    if (try self.iter.?.next()) |section| {
-                        switch (section) {
-                            .header => |header| {
-                                return .{ .header = header };
-                            },
-                            .question => |question| {
-                                return .{ .question = question };
-                            },
-                            .record, .authority_record, .additional_record => |record| {
-                                return .{ .record = record };
-                            },
-                        }
-                    } else {
-                        self.state = .next_socket;
-                        return .{ .end_message = {} };
-                    }
-                },
-                .next_socket => {
-                    self.curr += 1;
-                    if (self.curr == self.sockets.?.len) {
-                        self.curr = 0;
-                    }
-                    self.state = .receive;
-                },
-            }
+    pub fn nextIter(self: *@This()) !?MessageRecordIterator {
+        if (try self.next()) |msg| {
+            return MessageRecordIterator.init(msg);
         }
+        return null;
     }
-    // no default return, each state and branch must return accordingly
 };
 
+pub const MessageRecordIterator = struct {};
+
 pub const Message = struct {
+    allocator: std.mem.Allocator,
+
     header: Header = Header{},
     questions: []const Question = &[_]Question{},
     records: []const Record = &[_]Record{},
@@ -203,63 +130,64 @@ pub const Message = struct {
     additional_records: []const Record = &[_]Record{},
 
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
-        var iter = @This().streamIterator(allocator, stream);
-
-        var header: Header = .{};
         var questions = std.ArrayList(Question).init(allocator);
         var records = std.ArrayList(Record).init(allocator);
         var authority_records = std.ArrayList(Record).init(allocator);
         var additional_records = std.ArrayList(Record).init(allocator);
+
         errdefer {
-            questions.deinit();
-            records.deinit();
-            authority_records.deinit();
-            additional_records.deinit();
             for (questions.items) |q| {
                 q.deinit(allocator);
             }
+            questions.deinit();
             for (records.items) |r| {
                 r.deinit(allocator);
             }
+            records.deinit();
             for (authority_records.items) |r| {
                 r.deinit(allocator);
             }
+            authority_records.deinit();
             for (additional_records.items) |r| {
                 r.deinit(allocator);
             }
+            additional_records.deinit();
         }
 
-        while (try iter.next()) |section| {
-            switch (section) {
-                .header => |h| {
-                    header = h;
-                },
-                .question => |q| {
-                    try questions.append(q);
-                },
-                .record => |r| {
-                    try records.append(r);
-                },
-                .authority_record => |r| {
-                    try authority_records.append(r);
-                },
-                .additional_record => |r| {
-                    try additional_records.append(r);
-                },
-            }
+        const header = try Header.read(stream);
+
+        var i: usize = 0;
+        while (i < header.number_of_questions) : (i += 1) {
+            const question = try Question.read(allocator, stream);
+            try questions.append(question);
+        }
+
+        i = 0;
+        while (i < header.number_of_answers) : (i += 1) {
+            const record = try Record.read(allocator, stream);
+            try records.append(record);
+        }
+
+        i = 0;
+        while (i < header.number_of_authority_resource_records) : (i += 1) {
+            const record = try Record.read(allocator, stream);
+            try authority_records.append(record);
+        }
+
+        i = 0;
+        while (i < header.number_of_additional_resource_records) : (i += 1) {
+            const record = try Record.read(allocator, stream);
+            try additional_records.append(record);
         }
 
         return @This(){
+            .allocator = allocator,
             .header = header,
             .questions = try questions.toOwnedSlice(),
             .records = try records.toOwnedSlice(),
             .authority_records = try authority_records.toOwnedSlice(),
             .additional_records = try additional_records.toOwnedSlice(),
         };
-    }
-
-    pub fn streamIterator(allocator: std.mem.Allocator, stream: anytype) MessageIterator(@TypeOf(stream)) {
-        return MessageIterator(@TypeOf(stream)).init(allocator, stream);
     }
 
     pub fn writeTo(self: @This(), stream: anytype) !void {
@@ -278,114 +206,28 @@ pub const Message = struct {
         }
     }
 
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: @This()) void {
         for (self.questions) |q| {
-            allocator.free(q.name);
+            self.allocator.free(q.name);
         }
-        allocator.free(self.questions);
+        self.allocator.free(self.questions);
 
         for (self.records) |r| {
-            r.deinit(allocator);
+            r.deinit(self.allocator);
         }
-        allocator.free(self.records);
+        self.allocator.free(self.records);
 
         for (self.authority_records) |r| {
-            r.deinit(allocator);
+            r.deinit(self.allocator);
         }
-        allocator.free(self.authority_records);
+        self.allocator.free(self.authority_records);
 
         for (self.additional_records) |r| {
-            r.deinit(allocator);
+            r.deinit(self.allocator);
         }
-        allocator.free(self.additional_records);
+        self.allocator.free(self.additional_records);
     }
 };
-
-pub fn MessageIterator(StreamType: type) type {
-    return struct {
-        allocator: std.mem.Allocator,
-        stream: StreamType,
-
-        header: ?Header = null,
-        n: usize = 0,
-        state: enum {
-            header,
-            questions,
-            answers,
-            authority_records,
-            additional_records,
-            done,
-        } = .header,
-
-        pub fn init(allocator: std.mem.Allocator, stream: StreamType) @This() {
-            return .{ .allocator = allocator, .stream = stream };
-        }
-
-        pub fn next(self: *@This()) !?union(enum) {
-            header: Header,
-            question: Question,
-            record: Record,
-            authority_record: Record,
-            additional_record: Record,
-        } {
-            switch (self.state) {
-                .header => {
-                    const header = try Header.read(self.stream);
-                    self.header = header;
-                    self.state = .questions;
-                    return .{ .header = header };
-                },
-                .questions => {
-                    if (self.n < self.header.?.number_of_questions) {
-                        const question = try Question.read(self.allocator, self.stream);
-                        self.n += 1;
-                        return .{ .question = question };
-                    } else {
-                        self.n = 0;
-                        self.state = .answers;
-                        return self.next();
-                    }
-                },
-                .answers => {
-                    if (self.n < self.header.?.number_of_answers) {
-                        const record = try Record.read(self.allocator, self.stream);
-                        self.n += 1;
-                        return .{ .record = record };
-                    } else {
-                        self.n = 0;
-                        self.state = .authority_records;
-                        return self.next();
-                    }
-                },
-                .authority_records => {
-                    if (self.n < self.header.?.number_of_authority_resource_records) {
-                        const record = try Record.read(self.allocator, self.stream);
-                        self.n += 1;
-                        return .{ .authority_record = record };
-                    } else {
-                        self.n = 0;
-                        self.state = .additional_records;
-                        return self.next();
-                    }
-                },
-                .additional_records => {
-                    if (self.n < self.header.?.number_of_additional_resource_records) {
-                        const record = try Record.read(self.allocator, self.stream);
-                        self.n += 1;
-                        return .{ .additional_record = record };
-                    } else {
-                        self.n = 0;
-                        self.state = .done;
-                        return self.next();
-                    }
-                },
-                .done => {
-                    return null;
-                },
-            }
-        }
-    };
-}
 
 pub const Header = packed struct {
     ID: u16 = 0,
@@ -410,7 +252,9 @@ pub const Header = packed struct {
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         try writer.writeInt(u16, self.ID, .big);
-        try writer.writeInt(u16, @bitCast(self.flags), .big);
+
+        try self.flags.writeTo(stream);
+
         try writer.writeInt(u16, self.number_of_questions, .big);
         try writer.writeInt(u16, self.number_of_answers, .big);
         try writer.writeInt(u16, self.number_of_authority_resource_records, .big);
@@ -434,6 +278,15 @@ pub const Flags = packed struct {
             flag_bits = @bitReverse(flag_bits);
         }
         return @bitCast(flag_bits);
+    }
+
+    pub fn writeTo(self: @This(), stream: anytype) !void {
+        var writer = stream.writer();
+        var flag_bits: u16 = @bitCast(self);
+        if (builtin.cpu.arch.endian() == .little) {
+            flag_bits = @bitReverse(flag_bits);
+        }
+        try writer.writeInt(u16, flag_bits, .big);
     }
 };
 
@@ -566,6 +419,8 @@ pub const RecordData = union(enum) {
                     txts.deinit();
                 }
 
+                // TODO: split
+
                 var total: usize = 0;
                 while (total < len) {
                     const txt_len = try reader.readByte();
@@ -588,10 +443,27 @@ pub const RecordData = union(enum) {
         }
     }
 
-    pub fn writeTo(_: @This(), stream: anytype) !void {
+    pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
-        try writer.writeInt(u16, 0, .big);
-        // TODO: writer for Resource data
+        switch (self) {
+            .ip => {
+                try writer.writeInt(u16, 0, .big);
+            },
+            .srv => {
+                try writer.writeInt(u16, 0, .big);
+            },
+            .txt => {
+                try writer.writeInt(u16, 0, .big);
+            },
+            .ptr => |ptr| {
+                try writer.writeInt(u16, @truncate(ptr.len), .big);
+                try writeName(writer, ptr);
+            },
+            .raw => |bytes| {
+                try writer.writeInt(u16, @truncate(bytes.len), .big);
+                _ = try writer.write(bytes);
+            },
+        }
     }
 
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
@@ -872,8 +744,8 @@ test "Read a message" {
 
 // Nameserver logic
 
-pub fn getNameservers(allocator: std.mem.Allocator, name: []const u8) ![]std.net.Address {
-    if (isLocal(name)) {
+pub fn getNameservers(allocator: std.mem.Allocator, local: bool) ![]std.net.Address {
+    if (local) {
         return try getMulticast(allocator);
     } else {
         return try getDefaultNameservers(allocator);
@@ -993,6 +865,6 @@ const IP_ADDRESS_STRING = extern struct {
     String: [16]u8,
 };
 
-fn isLocal(address: []const u8) bool {
+pub fn isLocal(address: []const u8) bool {
     return std.ascii.endsWithIgnoreCase(address, ".local") or std.ascii.endsWithIgnoreCase(address, ".local.");
 }
