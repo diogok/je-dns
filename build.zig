@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const dns = b.addModule("dns", .{ .root_source_file = b.path("src/dns/dns.zig") });
     const dns_sd = b.addModule("dns_sd", .{ .root_source_file = b.path("src/dns/dns_sd.zig") });
     _ = b.addModule("socket", .{ .root_source_file = b.path("src/dns/socket.zig") });
+    _ = b.addModule("nameservers", .{ .root_source_file = b.path("src/dns/nameservers.zig") });
 
     const artifacts = [_][]const u8{
         "example",
@@ -14,18 +15,6 @@ pub fn build(b: *std.Build) void {
         "query",
         "announcer",
     };
-
-    {
-        const tests = b.addTest(.{
-            .target = target,
-            .optimize = optimize,
-            .root_source_file = b.path("src/dns/dns.zig"),
-        });
-
-        const run_tests = b.addRunArtifact(tests);
-        const run_test_step = b.step("test", "Run tests");
-        run_test_step.dependOn(&run_tests.step);
-    }
 
     for (artifacts[0..]) |artifact| {
         const exe = b.addExecutable(.{
@@ -43,5 +32,35 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addRunArtifact(exe);
         const run_step = b.step(b.fmt("run-{s}", .{artifact}), "Run example");
         run_step.dependOn(&run_cmd.step);
+    }
+
+    {
+        const tests = b.addTest(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("src/dns/root.zig"),
+        });
+
+        const run_tests = b.addRunArtifact(tests);
+        const run_test_step = b.step("test", "Run tests");
+        run_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const docs = b.addObject(.{
+            .name = "docs",
+            .target = target,
+            .optimize = .Debug,
+            .root_source_file = b.path("src/dns/root.zig"),
+        });
+
+        const install_docs = b.addInstallDirectory(.{
+            .source_dir = docs.getEmittedDocs(),
+            .install_dir = .prefix,
+            .install_subdir = "docs",
+        });
+
+        const docs_step = b.step("docs", "Install documentation");
+        docs_step.dependOn(&install_docs.step);
     }
 }

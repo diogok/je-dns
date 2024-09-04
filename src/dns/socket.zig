@@ -150,7 +150,7 @@ pub fn setTimeout(fd: std.posix.socket_t, millis: i32) !void {
 }
 
 pub fn enableReuse(sock: std.posix.socket_t) !void {
-    if (builtin.os.tag != .windows) {
+    if (builtin.os.tag == .linux) {
         try std.posix.setsockopt(
             sock,
             std.posix.SOL.SOCKET,
@@ -167,46 +167,45 @@ pub fn enableReuse(sock: std.posix.socket_t) !void {
 }
 
 pub fn setupMulticast(sock: std.posix.socket_t, address: std.net.Address) !void {
-    // TODO: win vs linux
     switch (address.any.family) {
         std.posix.AF.INET => {
             const any = try getAny(address);
             try std.posix.setsockopt(
                 sock,
-                std.os.SOL.IP,
-                std.os.system.IP.MULTICAST_IF,
+                SOL_IP,
+                IP_MULTICAST_IF,
                 std.mem.asBytes(&any.in.sa.addr),
             );
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IP,
-                std.posix.system.IP.MULTICAST_LOOP,
+                SOL_IP,
+                IP_MULTICAST_LOOP,
                 &std.mem.toBytes(@as(c_int, 1)),
             );
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IP,
-                std.posix.system.IP.MULTICAST_TTL,
+                SOL_IP,
+                IP_MULTICAST_TTL,
                 &std.mem.toBytes(@as(c_int, 1)),
             );
         },
         std.posix.AF.INET6 => {
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IPV6,
-                std.posix.system.IPV6.MULTICAST_IF,
+                SOL_IPV6,
+                IPV6_MULTICAST_IF,
                 &std.mem.toBytes(@as(c_int, 0)),
             );
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IPV6,
-                std.posix.system.IPV6.MULTICAST_HOPS,
+                SOL_IPV6,
+                IPV6_MULTICAST_HOPS,
                 &std.mem.toBytes(@as(c_int, 1)),
             );
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IPV6,
-                std.posix.system.IPV6.MULTICAST_LOOP,
+                SOL_IPV6,
+                IPV6_MULTICAST_LOOP,
                 &std.mem.toBytes(@as(c_int, 1)),
             );
         },
@@ -227,8 +226,8 @@ pub fn addMembership(sock: std.posix.socket_t, address: std.net.Address) !void {
             };
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IP,
-                std.posix.linux.IP.ADD_MEMBERSHIP,
+                SOL_IP,
+                IP_ADD_MEMBERSHIP,
                 std.mem.asBytes(&membership),
             );
         },
@@ -242,8 +241,8 @@ pub fn addMembership(sock: std.posix.socket_t, address: std.net.Address) !void {
             };
             try std.posix.setsockopt(
                 sock,
-                std.posix.SOL.IPV6,
-                std.posix.system.IPV6.ADD_MEMBERSHIP,
+                SOL_IPV6,
+                IPV6_ADD_MEMBERSHIP,
                 std.mem.asBytes(&membership),
             );
         },
@@ -272,3 +271,89 @@ pub fn getAny(address: std.net.Address) !std.net.Address {
         },
     }
 }
+
+const testing = std.testing;
+
+test "Socket connect ip4 localhost" {
+    const server = try std.net.Address.parseIp("127.0.0.1", 53);
+    var sock = try Socket.init(server, .{});
+    sock.deinit();
+}
+
+test "Socket connect ip4 multicast" {
+    const server = try std.net.Address.parseIp("224.0.0.251", 5353);
+    var sock = try Socket.init(server, .{});
+    sock.deinit();
+}
+
+test "Socket connect ip6 localhost" {
+    const server = try std.net.Address.parseIp("::1", 53);
+    var sock = try Socket.init(server, .{});
+    sock.deinit();
+}
+
+test "Socket connect ip6 multicast" {
+    const server = try std.net.Address.parseIp("ff02::fb", 5353);
+    var sock = try Socket.init(server, .{});
+    sock.deinit();
+}
+
+const SOL_IP = switch (builtin.os.tag) {
+    .windows => 0,
+    .linux => 0,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const SOL_IPV6 = switch (builtin.os.tag) {
+    .windows => 0,
+    .linux => 41,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IP_MULTICAST_IF = switch (builtin.os.tag) {
+    .windows => 9,
+    .linux => 32,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IP_MULTICAST_TTL = switch (builtin.os.tag) {
+    .windows => 0,
+    .linux => 33,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IP_MULTICAST_LOOP = switch (builtin.os.tag) {
+    .windows => 0,
+    .linux => 34,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IP_ADD_MEMBERSHIP = switch (builtin.os.tag) {
+    .windows => 9,
+    .linux => 35,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IPV6_MULTICAST_IF = switch (builtin.os.tag) {
+    .windows => 9,
+    .linux => 17,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IPV6_MULTICAST_HOPS = switch (builtin.os.tag) {
+    .windows => 10,
+    .linux => 18,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IPV6_MULTICAST_LOOP = switch (builtin.os.tag) {
+    .windows => 11,
+    .linux => 19,
+    else => @compileError("UNSUPPORTED OS"),
+};
+
+const IPV6_ADD_MEMBERSHIP = switch (builtin.os.tag) {
+    .windows => 12,
+    .linux => 20,
+    else => @compileError("UNSUPPORTED OS"),
+};

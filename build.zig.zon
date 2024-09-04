@@ -1,0 +1,7 @@
+.{
+	.name = "with-me",
+	.version = "0.0.0",
+	.paths =  .{"src"},
+	.dependencies =.{
+	},
+}

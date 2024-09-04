@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const testing = std.testing;
 
 const net = @import("socket.zig");
+const ns = @import("nameservers.zig");
 
 pub const Options = struct {
     socket_options: net.Options = .{
@@ -25,11 +26,9 @@ pub const DNSClient = struct {
     }
 
     pub fn connect(self: *@This(), local: bool) !void {
-        self.deinit();
+        self.disconnect();
 
-        // TODO: this client can only do local or regular dns, not both
-
-        const servers = try getNameservers(self.allocator, local);
+        const servers = try ns.getNameservers(self.allocator, local);
         defer self.allocator.free(servers);
         if (servers.len == 0) {
             return error.NoServerFound;
@@ -54,9 +53,10 @@ pub const DNSClient = struct {
 
     pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
         const local = isLocal(name);
-        if (self.sockets == null) try self.connect(local);
+        try self.connect(local);
 
         const message = Message{
+            .allocator = null,
             .header = .{
                 .ID = mkid(),
                 .flags = .{
@@ -83,17 +83,6 @@ pub const DNSClient = struct {
         }
     }
 
-    pub fn deinit(self: *@This()) void {
-        if (self.sockets) |sockets| {
-            for (sockets) |socket| {
-                socket.deinit();
-                self.allocator.destroy(socket);
-            }
-            self.allocator.free(sockets);
-        }
-        self.curr = 0;
-    }
-
     pub fn next(self: *@This()) !?Message {
         var count: u8 = 0;
         while (count <= 9) : (count += 1) {
@@ -107,21 +96,28 @@ pub const DNSClient = struct {
 
             return message;
         }
+        self.disconnect();
         return null;
     }
 
-    pub fn nextIter(self: *@This()) !?MessageRecordIterator {
-        if (try self.next()) |msg| {
-            return MessageRecordIterator.init(msg);
+    pub fn disconnect(self: *@This()) void {
+        if (self.sockets) |sockets| {
+            for (sockets) |socket| {
+                socket.deinit();
+                self.allocator.destroy(socket);
+            }
+            self.allocator.free(sockets);
         }
-        return null;
+        self.curr = 0;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.disconnect();
     }
 };
 
-pub const MessageRecordIterator = struct {};
-
 pub const Message = struct {
-    allocator: std.mem.Allocator,
+    allocator: ?std.mem.Allocator = null,
 
     header: Header = Header{},
     questions: []const Question = &[_]Question{},
@@ -207,25 +203,27 @@ pub const Message = struct {
     }
 
     pub fn deinit(self: @This()) void {
-        for (self.questions) |q| {
-            self.allocator.free(q.name);
-        }
-        self.allocator.free(self.questions);
+        if (self.allocator) |allocator| {
+            for (self.questions) |q| {
+                allocator.free(q.name);
+            }
+            allocator.free(self.questions);
 
-        for (self.records) |r| {
-            r.deinit(self.allocator);
-        }
-        self.allocator.free(self.records);
+            for (self.records) |r| {
+                r.deinit(allocator);
+            }
+            allocator.free(self.records);
 
-        for (self.authority_records) |r| {
-            r.deinit(self.allocator);
-        }
-        self.allocator.free(self.authority_records);
+            for (self.authority_records) |r| {
+                r.deinit(allocator);
+            }
+            allocator.free(self.authority_records);
 
-        for (self.additional_records) |r| {
-            r.deinit(self.allocator);
+            for (self.additional_records) |r| {
+                r.deinit(allocator);
+            }
+            allocator.free(self.additional_records);
         }
-        self.allocator.free(self.additional_records);
     }
 };
 
@@ -626,10 +624,6 @@ pub const ResourceClass = enum(u16) {
     _,
 };
 
-pub fn mkid() u16 {
-    return @truncate(@as(u64, @bitCast(std.time.timestamp())));
-}
-
 test "Write a message" {
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
@@ -708,7 +702,7 @@ test "Read a message" {
     var stream = std.io.fixedBufferStream(buffer[0..]);
 
     const reply = try Message.read(testing.allocator, &stream);
-    defer reply.deinit(testing.allocator);
+    defer reply.deinit();
 
     try testing.expectEqual(reply.header.ID, 256);
     try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
@@ -742,129 +736,10 @@ test "Read a message" {
     try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
 }
 
-// Nameserver logic
-
-pub fn getNameservers(allocator: std.mem.Allocator, local: bool) ![]std.net.Address {
-    if (local) {
-        return try getMulticast(allocator);
-    } else {
-        return try getDefaultNameservers(allocator);
-    }
-}
-
-pub fn getDefaultNameservers(allocator: std.mem.Allocator) ![]std.net.Address {
-    if (builtin.os.tag == .windows) {
-        return try get_windows_dns_servers(allocator);
-    } else {
-        return try get_resolvconf_dns_servers(allocator);
-    }
-}
-
-pub fn getMulticast(allocator: std.mem.Allocator) ![]std.net.Address {
-    const addresses = try allocator.alloc(std.net.Address, 2);
-    addresses[0] = try std.net.Address.parseIp("ff02::fb", 5353);
-    addresses[1] = try std.net.Address.parseIp("224.0.0.251", 5353);
-    return addresses;
-}
-
-// Resolv.conf
-
-fn get_resolvconf_dns_servers(allocator: std.mem.Allocator) ![]std.net.Address {
-    const resolvconf = try std.fs.openFileAbsolute("/etc/resolv.conf", .{});
-    defer resolvconf.close();
-    const reader = resolvconf.reader();
-    return try parse_resolvconf(allocator, reader);
-}
-
-fn parse_resolvconf(allocator: std.mem.Allocator, reader: anytype) ![]std.net.Address {
-    var addresses = std.ArrayList(std.net.Address).init(allocator);
-
-    var buffer: [1024]u8 = undefined;
-    while (try reader.readUntilDelimiterOrEof(&buffer, '\n')) |line| {
-        if (line.len > 10 and std.mem.eql(u8, line[0..10], "nameserver")) {
-            var pos: usize = 10;
-            while (pos < line.len and std.ascii.isWhitespace(line[pos])) : (pos += 1) {}
-            const start: usize = pos;
-            while (pos < line.len and (std.ascii.isHex(line[pos]) or line[pos] == '.' or line[pos] == ':')) : (pos += 1) {}
-            const address = std.net.Address.resolveIp(line[start..pos], 53) catch continue;
-            try addresses.append(address);
-        }
-    }
-
-    return addresses.toOwnedSlice();
-}
-
-test "read resolv.conf" {
-    const resolvconf =
-        \\;a comment
-        \\# another comment
-        \\
-        \\domain    example.com
-        \\
-        \\nameserver     127.0.0.53 # comment after
-        \\nameserver ::ff
-    ;
-    var stream = std.io.fixedBufferStream(resolvconf);
-    const reader = stream.reader();
-
-    const addresses = try parse_resolvconf(testing.allocator, reader);
-    defer testing.allocator.free(addresses);
-
-    const ip4 = try std.net.Address.parseIp4("127.0.0.53", 53);
-    const ip6 = try std.net.Address.parseIp6("::ff", 53);
-
-    try testing.expectEqual(2, addresses.len);
-    try testing.expect(addresses[0].eql(ip4));
-    try testing.expect(addresses[1].eql(ip6));
-}
-
-// Windows API and Structs for Nameservers
-
-fn get_windows_dns_servers(allocator: std.mem.Allocator) ![]std.net.Address {
-    var addresses = std.ArrayList(std.net.Address).init(allocator);
-
-    var info = std.mem.zeroInit(PFIXED_INFO, .{});
-    var buf_len: u32 = @intCast(@sizeOf(PFIXED_INFO));
-    _ = GetNetworkParams(&info, &buf_len);
-
-    var maybe_server = info.CurrentDnsServer;
-    while (maybe_server) |server| {
-        var len: usize = 0;
-        while (server.IpAddress.String[len] != 0) : (len += 1) {}
-        const addr = server.IpAddress.String[0..len];
-        const address = std.net.Address.parseIp(addr, 53) catch break;
-        try addresses.append(address);
-        maybe_server = server.Next;
-    }
-
-    return addresses.toOwnedSlice();
-}
-
-extern "iphlpapi" fn GetNetworkParams(pFixedInfo: ?*PFIXED_INFO, pOutBufLen: ?*u32) callconv(.C) u32;
-
-const PFIXED_INFO = extern struct {
-    HostName: [132]u8,
-    DomainName: [132]u8,
-    CurrentDnsServer: ?*IP_ADDR_STRING,
-    DnsServerList: IP_ADDR_STRING,
-    NodeType: u32,
-    ScopeId: [260]u8,
-    EnableRouting: u32,
-    EnableProxy: u32,
-    EnableDns: u32,
-};
-
-const IP_ADDR_STRING = extern struct {
-    Next: ?*IP_ADDR_STRING,
-    IpAddress: IP_ADDRESS_STRING,
-    IpMask: IP_ADDRESS_STRING,
-    Context: u32,
-};
-
-const IP_ADDRESS_STRING = extern struct {
-    String: [16]u8,
-};
-
 pub fn isLocal(address: []const u8) bool {
     return std.ascii.endsWithIgnoreCase(address, ".local") or std.ascii.endsWithIgnoreCase(address, ".local.");
+}
+
+pub fn mkid() u16 {
+    return @truncate(@as(u64, @bitCast(std.time.timestamp())));
 }
