@@ -102,6 +102,7 @@ fn get_windows_dns_servers(allocator: std.mem.Allocator) ![]std.net.Address {
     var buf_len: u32 = @sizeOf(PFIXED_INFO);
     const ret = GetNetworkParams(&info, &buf_len);
     if (ret != 0) {
+        std.debug.print("GetNetworkParams error {d}\n", .{ret});
         return error.WindowsError;
     }
 
