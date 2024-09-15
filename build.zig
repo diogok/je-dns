@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
     const artifacts = [_][]const u8{
         "example",
         "service_list",
-        "query",
         "announcer",
     };
 
@@ -39,6 +38,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .root_source_file = b.path("src/dns/root.zig"),
+            .link_libc = target.result.os.tag == .windows, // used to get default dns addresses
         });
 
         const run_tests = b.addRunArtifact(tests);

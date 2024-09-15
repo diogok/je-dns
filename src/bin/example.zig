@@ -13,7 +13,7 @@ pub fn main() !void {
     defer client.deinit();
     try client.query("example.com", .A);
 
-    if (try client.next()) |message| {
+    while (try client.next()) |message| {
         defer message.deinit();
         dnslog.logRecord(log.info, message.records[0]);
     }

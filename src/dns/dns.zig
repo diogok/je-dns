@@ -7,7 +7,7 @@ const ns = @import("nameservers.zig");
 
 pub const Options = struct {
     socket_options: net.Options = .{
-        .timeout_in_millis = 200,
+        .timeout_in_millis = 5000,
     },
 };
 
@@ -23,32 +23,6 @@ pub const DNSClient = struct {
             .allocator = allocator,
             .options = options,
         };
-    }
-
-    pub fn connect(self: *@This(), local: bool) !void {
-        self.disconnect();
-
-        const servers = try ns.getNameservers(self.allocator, local);
-        defer self.allocator.free(servers);
-        if (servers.len == 0) {
-            return error.NoServerFound;
-        }
-
-        var i: usize = 0;
-        var sockets = try self.allocator.alloc(*net.Socket, servers.len);
-        errdefer {
-            for (sockets[0..i]) |sock| {
-                self.allocator.destroy(sock);
-            }
-            self.allocator.free(sockets);
-        }
-        for (servers) |addr| {
-            const socket = try net.Socket.init(addr, self.options.socket_options);
-            sockets[i] = try self.allocator.create(net.Socket);
-            sockets[i].* = socket;
-            i += 1;
-        }
-        self.sockets = sockets;
     }
 
     pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
@@ -76,7 +50,33 @@ pub const DNSClient = struct {
         try self.send(message);
     }
 
-    pub fn send(self: *@This(), message: Message) !void {
+    fn connect(self: *@This(), local: bool) !void {
+        self.disconnect();
+
+        const servers = try ns.getNameservers(self.allocator, local);
+        defer self.allocator.free(servers);
+        if (servers.len == 0) {
+            return error.NoServerFound;
+        }
+
+        var i: usize = 0;
+        var sockets = try self.allocator.alloc(*net.Socket, servers.len);
+        errdefer {
+            for (sockets[0..i]) |sock| {
+                self.allocator.destroy(sock);
+            }
+            self.allocator.free(sockets);
+        }
+        for (servers) |addr| {
+            const socket = try net.Socket.init(addr, self.options.socket_options);
+            sockets[i] = try self.allocator.create(net.Socket);
+            sockets[i].* = socket;
+            i += 1;
+        }
+        self.sockets = sockets;
+    }
+
+    fn send(self: *@This(), message: Message) !void {
         for (self.sockets.?) |socket| {
             try message.writeTo(socket.stream());
             try socket.send();
@@ -86,8 +86,10 @@ pub const DNSClient = struct {
     pub fn next(self: *@This()) !?Message {
         var count: u8 = 0;
         while (count <= 9) : (count += 1) {
-            const stream = self.sockets.?[self.curr].receive() catch continue;
-            const message = Message.read(self.allocator, stream) catch continue;
+            std.debug.print("A\n", .{});
+            const socket = self.sockets.?[self.curr];
+            var stream = socket.receive() catch continue;
+            const message = Message.read(self.allocator, &stream) catch continue;
 
             self.curr += 1;
             if (self.curr == self.sockets.?.len) {
@@ -100,13 +102,14 @@ pub const DNSClient = struct {
         return null;
     }
 
-    pub fn disconnect(self: *@This()) void {
+    fn disconnect(self: *@This()) void {
         if (self.sockets) |sockets| {
             for (sockets) |socket| {
                 socket.deinit();
                 self.allocator.destroy(socket);
             }
             self.allocator.free(sockets);
+            self.sockets = null;
         }
         self.curr = 0;
     }
@@ -115,6 +118,25 @@ pub const DNSClient = struct {
         self.disconnect();
     }
 };
+
+test "query sample" {
+    var client = DNSClient.init(testing.allocator, .{});
+    defer client.deinit();
+    try client.query("example.com", .A);
+
+    //const exampleipv4 = try std.net.Address.parseIp4("93.184.215.14", 0);
+
+    const msg = try client.next();
+    defer msg.?.deinit();
+    try testing.expect(msg != null);
+    //const ip = msg.?.records[0].data.ip;
+    //std.debug.print("A {any}\n", .{ip});
+    //try testing.expect(ip.eql(exampleipv4));
+
+    const msg2 = try client.next();
+    //defer msg2.deinit();
+    try testing.expect(msg2 == null);
+}
 
 pub const Message = struct {
     allocator: ?std.mem.Allocator = null,
