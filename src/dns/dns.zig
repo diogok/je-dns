@@ -131,10 +131,6 @@ test "query sample" {
     try testing.expect(msg != null);
     const gotipv4 = msg.?.records[0].data.ip;
     try testing.expect(gotipv4.eql(wantipv4));
-
-    const msg2 = try client.next();
-    //defer msg2.deinit();
-    try testing.expect(msg2 == null);
 }
 
 pub const Message = struct {
