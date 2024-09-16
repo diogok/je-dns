@@ -17,4 +17,11 @@ pub fn main() !void {
         defer message.deinit();
         dnslog.logRecord(log.info, message.records[0]);
     }
+
+    try client.query("example.com", .AAAA);
+
+    while (try client.next()) |message| {
+        defer message.deinit();
+        dnslog.logRecord(log.info, message.records[0]);
+    }
 }

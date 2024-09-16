@@ -8,7 +8,7 @@ pub const Options = struct {
         UDP = std.posix.SOCK.DGRAM,
         //TCP = std.posix.SOCK.STREAM,
     } = .UDP,
-    timeout_in_millis: u32 = 1000,
+    timeout_in_millis: u32 = 100,
     initalize: bool = true,
 };
 
@@ -20,7 +20,7 @@ pub const Socket = struct {
     send_buffer: [512]u8 = undefined,
     send_stream: ?Stream,
 
-    options: Options,
+    timeout: u32,
 
     pub fn init(address: std.net.Address, options: Options) !@This() {
         const handle = try std.posix.socket(
@@ -33,7 +33,7 @@ pub const Socket = struct {
             .address = address,
             .handle = handle,
             .send_stream = null,
-            .options = options,
+            .timeout = options.timeout_in_millis,
         };
 
         const send_stream = std.io.fixedBufferStream(&self.send_buffer);
@@ -68,13 +68,20 @@ pub const Socket = struct {
     }
 
     pub fn receive(self: *@This()) !Stream {
+        try self.wait();
+        const len = try std.posix.recv(self.handle, &self.recv_buffer, 0);
+        return std.io.fixedBufferStream(self.recv_buffer[0..len]);
+    }
+
+    pub fn wait(self: *@This()) !void {
         if (builtin.os.tag == .windows) {
             var fd_set = std.mem.zeroes(std.os.windows.ws2_32.fd_set);
             fd_set.fd_count = 1;
             fd_set.fd_array[0] = self.handle;
+            const pTimeval = makeTimevalue(self.timeout);
             const timeval = std.os.windows.ws2_32.timeval{
-                .tv_sec = 0,
-                .tv_usec = 500 * 1000,
+                .tv_sec = pTimeval.tv_sec,
+                .tv_usec = pTimeval.tv_usec,
             };
             const timeout: ?*const @TypeOf(timeval) = &timeval;
             const r = std.os.windows.ws2_32.select(1, &fd_set, null, null, timeout);
@@ -82,14 +89,15 @@ pub const Socket = struct {
                 return error.Timeout;
             }
         } else {
-            //var fds = [_]std.posix.pollfd{
-            //    .{ .fd = self.handle, .events = 0, .revents = 0 },
-            //};
-            //const r = try std.posix.poll(&fds, @as(i32, @intCast(self.options.timeout_in_millis)) * 1000);
-            //std.debug.print("RR {d}\n", .{r});
+            var fds = [_]std.posix.pollfd{
+                .{ .fd = self.handle, .events = 0, .revents = 0 },
+            };
+            const r = try std.posix.poll(&fds, @as(i32, @intCast(self.timeout)) * 1000);
+            if (r == 0) {
+                return error.Timeout;
+            }
         }
-        const len = try std.posix.recv(self.handle, &self.recv_buffer, 0);
-        return std.io.fixedBufferStream(self.recv_buffer[0..len]);
+        return;
     }
 
     pub fn stream(self: *@This()) *Stream {
@@ -152,40 +160,31 @@ pub fn isMulticast(address: std.net.Address) bool {
 }
 
 pub fn setSocketTimeout(fd: std.posix.socket_t, millis: u32) !void {
-    if (millis > 0) {
-        const timeout = makeTimeout(millis);
-        const value: []const u8 = std.mem.toBytes(timeout)[0..];
+    const timeout = makeTimevalue(millis);
+    const value: []const u8 = std.mem.toBytes(timeout)[0..];
 
-        if (builtin.os.tag == .windows) {
-            //var mode: c_uint = 1;
-            //_ = std.os.windows.ws2_32.ioctlsocket(fd, std.os.windows.ws2_32.FIONBIO, &mode);
-            //var m: u32 = 11;
-            //value = std.mem.asBytes(&m);
-        }
-
-        try std.posix.setsockopt(
-            fd,
-            std.posix.SOL.SOCKET,
-            std.posix.SO.RCVTIMEO,
-            value,
-        );
-        try std.posix.setsockopt(
-            fd,
-            std.posix.SOL.SOCKET,
-            std.posix.SO.SNDTIMEO,
-            value,
-        );
-    }
+    try std.posix.setsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVTIMEO,
+        value,
+    );
+    try std.posix.setsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.SNDTIMEO,
+        value,
+    );
 }
 
-pub fn makeTimeout(millis: u32) std.posix.timeval {
+pub fn makeTimevalue(millis: u32) std.posix.timeval {
     const micros: i32 = @as(i32, @intCast(millis)) * 1000;
 
-    var timeout: std.posix.timeval = undefined;
-    timeout.tv_sec = @as(c_long, @intCast(@divTrunc(micros, 1000000)));
-    timeout.tv_usec = @as(c_long, @intCast(@mod(micros, 1000000)));
+    var timeval: std.posix.timeval = undefined;
+    timeval.tv_sec = @as(c_long, @intCast(@divTrunc(micros, 1000000)));
+    timeval.tv_usec = @as(c_long, @intCast(@mod(micros, 1000000)));
 
-    return timeout;
+    return timeval;
 }
 
 pub fn enableReuse(sock: std.posix.socket_t) !void {
@@ -248,7 +247,9 @@ pub fn setupMulticast(sock: std.posix.socket_t, address: std.net.Address) !void 
                 &std.mem.toBytes(@as(c_int, 1)),
             );
         },
-        else => {},
+        else => {
+            return error.UnkownAddressFamily;
+        },
     }
 }
 

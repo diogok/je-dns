@@ -7,7 +7,7 @@ const ns = @import("nameservers.zig");
 
 pub const Options = struct {
     socket_options: net.Options = .{
-        .timeout_in_millis = 5000,
+        .timeout_in_millis = 100,
     },
 };
 
@@ -86,7 +86,6 @@ pub const DNSClient = struct {
     pub fn next(self: *@This()) !?Message {
         var count: u8 = 0;
         while (count <= 9) : (count += 1) {
-            std.debug.print("A\n", .{});
             const socket = self.sockets.?[self.curr];
             var stream = socket.receive() catch continue;
             const message = Message.read(self.allocator, &stream) catch continue;
@@ -122,16 +121,16 @@ pub const DNSClient = struct {
 test "query sample" {
     var client = DNSClient.init(testing.allocator, .{});
     defer client.deinit();
-    try client.query("example.com", .A);
 
-    //const exampleipv4 = try std.net.Address.parseIp4("93.184.215.14", 0);
+    // There is probably some better way to test it without depending on real DNS resolution
+    try client.query("example.com", .A);
+    const wantipv4 = try std.net.Address.parseIp4("93.184.215.14", 0);
 
     const msg = try client.next();
     defer msg.?.deinit();
     try testing.expect(msg != null);
-    //const ip = msg.?.records[0].data.ip;
-    //std.debug.print("A {any}\n", .{ip});
-    //try testing.expect(ip.eql(exampleipv4));
+    const gotipv4 = msg.?.records[0].data.ip;
+    try testing.expect(gotipv4.eql(wantipv4));
 
     const msg2 = try client.next();
     //defer msg2.deinit();
