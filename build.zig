@@ -4,18 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("socket", .{
-        .root_source_file = b.path("src/dns/socket.zig"),
-    });
-    _ = b.addModule("nameservers", .{
-        .root_source_file = b.path("src/dns/nameservers.zig"),
-    });
-    _ = b.addModule("dns", .{
-        .root_source_file = b.path("src/dns/dns.zig"),
-    });
-    _ = b.addModule("dns_sd", .{
-        .root_source_file = b.path("src/dns/dns_sd.zig"),
-    });
     const dns = b.addModule("dns", .{
         .root_source_file = b.path("src/dns/root.zig"),
     });
@@ -74,4 +62,3 @@ pub fn build(b: *std.Build) void {
         docs_step.dependOn(&install_docs.step);
     }
 }
-
