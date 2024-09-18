@@ -1,5 +1,6 @@
 const std = @import("std");
-const dns_sd = @import("dns_sd");
+const dns = @import("dns");
+const dnslog = @import("dnslog.zig");
 
 const log = std.log.scoped(.discover_with_me);
 
@@ -8,25 +9,13 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    const result = try dns_sd.listLocalServices(allocator);
-    defer result.deinit();
+    var client = dns.DNSClient.init(allocator, .{});
+    defer client.deinit();
 
-    for (result.services) |service| {
-        log.info("Service found: {s}", .{service});
+    try client.query(dns.local_services_query, dns.resource_type);
 
-        const service_details = try dns_sd.listDetailedServices(allocator, service);
-        defer service_details.deinit();
-        for (service_details.services) |srv| {
-            log.info("=> Name: {s}", .{srv.name});
-            log.info("=> Host: {s}:{d}", .{ srv.host, srv.port });
-            log.info("=> Addresses: {d}", .{srv.addresses.len});
-            for (srv.addresses) |addr| {
-                log.info("==> {any}", .{addr});
-            }
-            log.info("=> TXT: {d}", .{srv.txt.len});
-            for (srv.txt) |txt| {
-                log.info("==> {s}", .{txt});
-            }
-        }
+    while (try client.next()) |message| {
+        defer message.deinit();
+        dnslog.logMessage(log.info, message);
     }
 }

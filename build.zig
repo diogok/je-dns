@@ -4,10 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const dns = b.addModule("dns", .{ .root_source_file = b.path("src/dns/dns.zig") });
-    const dns_sd = b.addModule("dns_sd", .{ .root_source_file = b.path("src/dns/dns_sd.zig") });
-    _ = b.addModule("socket", .{ .root_source_file = b.path("src/dns/socket.zig") });
-    _ = b.addModule("nameservers", .{ .root_source_file = b.path("src/dns/nameservers.zig") });
+    _ = b.addModule("socket", .{
+        .root_source_file = b.path("src/dns/socket.zig"),
+    });
+    _ = b.addModule("nameservers", .{
+        .root_source_file = b.path("src/dns/nameservers.zig"),
+    });
+    _ = b.addModule("dns", .{
+        .root_source_file = b.path("src/dns/dns.zig"),
+    });
+    _ = b.addModule("dns_sd", .{
+        .root_source_file = b.path("src/dns/dns_sd.zig"),
+    });
+    const dns = b.addModule("dns", .{
+        .root_source_file = b.path("src/dns/root.zig"),
+    });
 
     const artifacts = [_][]const u8{
         "example",
@@ -24,7 +35,6 @@ pub fn build(b: *std.Build) void {
             .link_libc = target.result.os.tag == .windows, // used to get default dns addresses
         });
         exe.root_module.addImport("dns", dns);
-        exe.root_module.addImport("dns_sd", dns_sd);
 
         b.installArtifact(exe);
 
@@ -64,3 +74,4 @@ pub fn build(b: *std.Build) void {
         docs_step.dependOn(&install_docs.step);
     }
 }
+

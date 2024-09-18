@@ -135,7 +135,7 @@ pub const Socket = struct {
             var fds = [_]std.posix.pollfd{
                 .{ .fd = self.handle, .events = 1, .revents = 0 },
             };
-            const r = try std.posix.poll(&fds, @as(i32, @intCast(self.timeout)) * 1000);
+            const r = try std.posix.poll(&fds, @as(i32, @intCast(self.timeout)));
             if (r == 0) {
                 return error.Timeout;
             }

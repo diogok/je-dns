@@ -2,47 +2,8 @@ const std = @import("std");
 const dns = @import("dns.zig");
 const net = @import("socket.zig");
 
-pub fn listLocalServices(allocator: std.mem.Allocator) !ServiceList {
-    var services = std.ArrayList([]const u8).init(allocator);
-
-    var client = dns.DNSClient.init(allocator, .{});
-    defer client.deinit();
-
-    try client.query("_services._dns-sd._udp.local", .PTR);
-
-    records: while (try client.nextRecord()) |record| {
-        defer record.deinit(allocator);
-        switch (record.resource_type) {
-            .PTR => {
-                for (services.items) |existing| {
-                    if (std.mem.eql(u8, existing, record.data.ptr)) {
-                        continue :records;
-                    }
-                }
-                const service = try allocator.alloc(u8, record.data.ptr.len);
-                std.mem.copyForwards(u8, service, record.data.ptr);
-                try services.append(service);
-            },
-            else => {},
-        }
-    }
-
-    return ServiceList{
-        .allocator = allocator,
-        .services = try services.toOwnedSlice(),
-    };
-}
-
-pub const ServiceList = struct {
-    allocator: std.mem.Allocator,
-    services: [][]const u8,
-    pub fn deinit(self: @This()) void {
-        for (self.services) |service| {
-            self.allocator.free(service);
-        }
-        self.allocator.free(self.services);
-    }
-};
+pub const local_services_query = "_services._dns-sd._udp.local";
+pub const resource_type: dns.ResourceType = .PTR;
 
 pub fn listDetailedServices(allocator: std.mem.Allocator, qname: []const u8) !DetailedServiceList {
     var services = std.ArrayList(DetailedService).init(allocator);

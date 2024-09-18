@@ -1,3 +1,5 @@
+//! Contains a DNS Client.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
@@ -5,19 +7,27 @@ const testing = std.testing;
 const net = @import("socket.zig");
 const ns = @import("nameservers.zig");
 
+/// Options for DNSClient.
 pub const Options = struct {
     socket_options: net.Options = .{
         .timeout_in_millis = 100,
     },
 };
 
+/// DNSClient, for querying and handling DNS requests.
+/// Works for IPv4 and IPv6.
+/// Main goal is to work with mDNS and DNS-SD, but should work with any request.
+/// It will query all available namesevers.
 pub const DNSClient = struct {
     allocator: std.mem.Allocator,
     options: Options,
 
+    /// All nameservers sockets.
     sockets: ?[]*net.Socket = null,
+    /// Current nameserver in use.
     curr: usize = 0,
 
+    /// Creates a new DNSClient with given options.
     pub fn init(allocator: std.mem.Allocator, options: Options) @This() {
         return @This(){
             .allocator = allocator,
@@ -25,18 +35,26 @@ pub const DNSClient = struct {
         };
     }
 
+    /// Query for some DNS records.
     pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
+        // .local domains are handled differently.
         const local = isLocal(name);
+
+        // First, connect to all nameservers.
         try self.connect(local);
 
+        // Prepare the query message
         const message = Message{
             .allocator = null,
             .header = .{
-                .ID = mkid(),
+                .ID = mkid(), // Creates a new mesage ID
                 .flags = .{
+                    // For .local, you don't want recursion.
+                    // It should resolve whithin your network.
                     .recursion_available = !local,
                     .recursion_desired = !local,
                 },
+                // Only one query
                 .number_of_questions = 1,
             },
             .questions = &[_]Question{
@@ -47,18 +65,23 @@ pub const DNSClient = struct {
             },
         };
 
+        // Sends the message to all nameservers
         try self.send(message);
     }
 
+    /// Connect to all available nameservers
     fn connect(self: *@This(), local: bool) !void {
+        // First we disconnect it any connection is already up
         self.disconnect();
 
+        // Get all nameservers.
         const servers = try ns.getNameservers(self.allocator, local);
         defer self.allocator.free(servers);
         if (servers.len == 0) {
             return error.NoServerFound;
         }
 
+        // Prepare all the Sockets
         var i: usize = 0;
         var sockets = try self.allocator.alloc(*net.Socket, servers.len);
         errdefer {
@@ -67,6 +90,8 @@ pub const DNSClient = struct {
             }
             self.allocator.free(sockets);
         }
+
+        // Connect to all servers
         for (servers) |addr| {
             const socket = try net.Socket.init(addr, self.options.socket_options);
             sockets[i] = try self.allocator.create(net.Socket);
@@ -76,6 +101,7 @@ pub const DNSClient = struct {
         self.sockets = sockets;
     }
 
+    /// Sends the message to all connected serves.
     fn send(self: *@This(), message: Message) !void {
         for (self.sockets.?) |socket| {
             try message.writeTo(socket.stream());
@@ -83,24 +109,40 @@ pub const DNSClient = struct {
         }
     }
 
+    /// Reads the next (or first) response message.
+    /// It will read from each server interleaved.
     pub fn next(self: *@This()) !?Message {
         var count: u8 = 0;
+        // Because we use short timeout, some messages may need to be retried.
+        // This is needed mostly to wait for all nodes to respond to multicast requests (mDNS).
+        // but it will only loop on no response.
         while (count <= 9) : (count += 1) {
+            // get current server
             const socket = self.sockets.?[self.curr];
+
+            // receive a message, ignore if it fails, probably a timeout or no response
             var stream = socket.receive() catch continue;
+
+            // parse the message, if it fails it is probably invalid message so ignore
             const message = Message.read(self.allocator, &stream) catch continue;
 
+            // use next server
             self.curr += 1;
             if (self.curr == self.sockets.?.len) {
+                // if last server, return to first
                 self.curr = 0;
             }
 
+            // return the message
             return message;
         }
+
+        // At this points, there is nothing else to read.
         self.disconnect();
         return null;
     }
 
+    /// Disconnect from all connected servers.
     fn disconnect(self: *@This()) void {
         if (self.sockets) |sockets| {
             for (sockets) |socket| {
@@ -113,6 +155,7 @@ pub const DNSClient = struct {
         self.curr = 0;
     }
 
+    /// Clean-up and disconnect.
     pub fn deinit(self: *@This()) void {
         self.disconnect();
     }
@@ -131,8 +174,13 @@ test "query sample" {
     try testing.expect(msg != null);
     const gotipv4 = msg.?.records[0].data.ip;
     try testing.expect(gotipv4.eql(wantipv4));
+
+    while (try client.next()) |msg0| {
+        msg0.deinit();
+    }
 }
 
+/// This is a DNS message, used both for queries and responses.
 pub const Message = struct {
     allocator: ?std.mem.Allocator = null,
 
@@ -142,6 +190,7 @@ pub const Message = struct {
     authority_records: []const Record = &[_]Record{},
     additional_records: []const Record = &[_]Record{},
 
+    /// Read message from a Stream.
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
         var questions = std.ArrayList(Question).init(allocator);
         var records = std.ArrayList(Record).init(allocator);
@@ -203,6 +252,7 @@ pub const Message = struct {
         };
     }
 
+    /// Write message to a stream.
     pub fn writeTo(self: @This(), stream: anytype) !void {
         try self.header.writeTo(stream);
         for (self.questions) |question| {
@@ -219,6 +269,7 @@ pub const Message = struct {
         }
     }
 
+    /// Free used memory.
     pub fn deinit(self: @This()) void {
         if (self.allocator) |allocator| {
             for (self.questions) |q| {
@@ -244,12 +295,23 @@ pub const Message = struct {
     }
 };
 
+/// The first part of a DNS Message.
 pub const Header = packed struct {
+    /// Generated ID on the request,
+    /// can be used to match a request and response.
     ID: u16 = 0,
+    /// Flags have information about both query or answer.
     flags: Flags = Flags{},
+    /// Number of questions, both in query and answer.
     number_of_questions: u16 = 0,
+    /// Number of answers on responses.
+    /// This is the common record response.
     number_of_answers: u16 = 0,
+    /// Number of authority records on responses.
+    /// This are responses if the server is the authority one.
     number_of_authority_resource_records: u16 = 0,
+    /// Number of answers on responses.
+    /// These are additional records, apart from the requested ones.
     number_of_additional_resource_records: u16 = 0,
 
     pub fn read(stream: anytype) !@This() {
@@ -277,6 +339,7 @@ pub const Header = packed struct {
     }
 };
 
+/// Flags for a DNS message, for query and answer.
 pub const Flags = packed struct {
     query_or_reply: QueryOrReply = .query,
     opcode: Opcode = .query,
@@ -284,7 +347,7 @@ pub const Flags = packed struct {
     truncation: bool = false,
     recursion_desired: bool = false,
     recursion_available: bool = false,
-    zero: u3 = 0,
+    padding: u3 = 0,
     response_code: ReplyCode = .no_error,
 
     pub fn read(reader: anytype) !@This() {
@@ -305,12 +368,15 @@ pub const Flags = packed struct {
     }
 };
 
+/// Question for a resource type. Also returned on Answers.
 pub const Question = struct {
+    /// Name is usually the domain, but also any query object.
     name: []const u8,
     resource_type: ResourceType,
     resource_class: ResourceClass = .IN,
 
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
+        // There are special rules for reading a name.
         const name = try readName(allocator, stream);
         errdefer allocator.free(name);
 
@@ -435,7 +501,6 @@ pub const RecordData = union(enum) {
                 }
 
                 // TODO: split
-
                 var total: usize = 0;
                 while (total < len) {
                     const txt_len = try reader.readByte();
@@ -503,6 +568,11 @@ pub const RecordData = union(enum) {
     }
 };
 
+/// Read a name from a DNS message.
+/// DNS names has a format that require havin access to the whole message.
+/// Each section (.) is prefixed with the length of that section.
+/// The end is byte '0'.
+/// A section maybe a pointer to another section elsewhere.
 fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
     var name_buffer = std.ArrayList(u8).init(allocator);
     defer name_buffer.deinit();
@@ -512,18 +582,22 @@ fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
     var reader = stream.reader();
     while (true) {
         const len = try reader.readByte();
-        if (len == 0) {
+        if (len == 0) { // if len is zero, there is no more data
             break;
-        } else if (len >= 192) {
-            const ptr0: u8 = len & 0b00111111;
-            const ptr1: u8 = try reader.readByte();
+        } else if (len >= 192) { // a length starting with 0b11 is a pointer
+            const ptr0: u8 = len & 0b00111111; // remove the points bits to get the
+            const ptr1: u8 = try reader.readByte(); // the following byte is part of the pointer
+            // Join the two bytes to get the address of the rest of the name
             const ptr = (@as(u16, ptr0) << 8) + @as(u16, ptr1);
+            // save current position
             if (seekBackTo == 0) {
                 seekBackTo = try stream.getPos();
             }
             try stream.seekTo(ptr);
         } else {
+            // If we already have a section, append a "."
             if (name_buffer.items.len > 0) try name_buffer.append('.');
+            // read the sepecificed len
             const label = try name_buffer.addManyAsSlice(len);
             _ = try reader.read(label);
         }
@@ -536,6 +610,10 @@ fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
     return try name_buffer.toOwnedSlice();
 }
 
+/// Writes a name in the format of DNS names.
+/// Each "section" (the parts excluding the ".") is written
+/// as first a byte with the length them the actual data.
+/// The last byte is a 0 indicating the end (no more section).
 fn writeName(writer: anytype, name: []const u8) !void {
     var labels_iter = std.mem.splitScalar(u8, name, '.');
     while (labels_iter.next()) |label| {
@@ -676,7 +754,7 @@ test "Read a message" {
         1, 0, // ID
         0b10100001, 0b10000000, // flags
         0, 1, //  number of questions  = 1
-        0, 2, // number of answers = 1
+        0, 2, // number of answers = 2
         0, 1, // number of authority answers = 1
         0, 1, // number of additional records = 1
         //  question
@@ -685,19 +763,19 @@ test "Read a message" {
         0, 1, 0, 1, // type = A, class = IN
         // record
         7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
-        0b11000000, 20, // last label of name is a pointer
+        0b11000000, 20, // last label of name is a pointer to above .com
         0, 1, 0, 1, // type = A, class = IN
         1, 0, 1, 0, // ttl = 16777472
         0, 4, // length
-        1, 2, 3, 4, // data
-        // record
+        1, 2, 3, 4, // data 1.2.3.4
+        // another record
         3, 'w', 'w', 'w', // first label of name
-        0b11000000, 29, // last label of name is a pointer recur
+        0b11000000, 29, // last label of name is a pointer recur to above record
         //3, 'c', 'o', 'm', 0, // last label of name
         0, 1, 0, 1, // type = A, class = IN
         1, 0, 1, 0, // ttl = 16777472
         0, 4, // length
-        4, 3, 2, 1, // data
+        4, 3, 2, 1, // data 4.3.2.1
         // authority record
         3, 'w', 'w', '2', // first label of name
         0b11000000, 29, // last label of name is a pointer recur
@@ -753,10 +831,13 @@ test "Read a message" {
     try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
 }
 
+/// Check if this is a .local address.
 pub fn isLocal(address: []const u8) bool {
-    return std.ascii.endsWithIgnoreCase(address, ".local") or std.ascii.endsWithIgnoreCase(address, ".local.");
+    return std.ascii.endsWithIgnoreCase(address, ".local") or
+        std.ascii.endsWithIgnoreCase(address, ".local.");
 }
 
+/// Create a ID for a DNS message.
 pub fn mkid() u16 {
     return @truncate(@as(u64, @bitCast(std.time.timestamp())));
 }

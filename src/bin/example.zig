@@ -15,13 +15,13 @@ pub fn main() !void {
 
     while (try client.next()) |message| {
         defer message.deinit();
-        dnslog.logRecord(log.info, message.records[0]);
+        dnslog.logMessage(log.info, message);
     }
 
     try client.query("example.com", .AAAA);
 
     while (try client.next()) |message| {
         defer message.deinit();
-        dnslog.logRecord(log.info, message.records[0]);
+        dnslog.logMessage(log.info, message);
     }
 }
