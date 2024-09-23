@@ -1,184 +1,8 @@
-//! Contains a DNS Client.
+//! Common data structures for DNS messages
 
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
-
-const net = @import("socket.zig");
-const ns = @import("nameservers.zig");
-
-/// Options for DNSClient.
-pub const Options = struct {
-    socket_options: net.Options = .{
-        .timeout_in_millis = 100,
-    },
-};
-
-/// DNSClient, for querying and handling DNS requests.
-/// Works for IPv4 and IPv6.
-/// Main goal is to work with mDNS and DNS-SD, but should work with any request.
-/// It will query all available namesevers.
-pub const DNSClient = struct {
-    allocator: std.mem.Allocator,
-    options: Options,
-
-    /// All nameservers sockets.
-    sockets: ?[]*net.Socket = null,
-    /// Current nameserver in use.
-    curr: usize = 0,
-
-    /// Creates a new DNSClient with given options.
-    pub fn init(allocator: std.mem.Allocator, options: Options) @This() {
-        return @This(){
-            .allocator = allocator,
-            .options = options,
-        };
-    }
-
-    /// Query for some DNS records.
-    pub fn query(self: *@This(), name: []const u8, resource_type: ResourceType) !void {
-        // .local domains are handled differently.
-        const local = isLocal(name);
-
-        // First, connect to all nameservers.
-        try self.connect(local);
-
-        // Prepare the query message
-        const message = Message{
-            .allocator = null,
-            .header = .{
-                .ID = mkid(), // Creates a new mesage ID
-                .flags = .{
-                    // For .local, you don't want recursion.
-                    // It should resolve whithin your network.
-                    .recursion_available = !local,
-                    .recursion_desired = !local,
-                },
-                // Only one query
-                .number_of_questions = 1,
-            },
-            .questions = &[_]Question{
-                .{
-                    .name = name,
-                    .resource_type = resource_type,
-                },
-            },
-        };
-
-        // Sends the message to all nameservers
-        try self.send(message);
-    }
-
-    /// Connect to all available nameservers
-    fn connect(self: *@This(), local: bool) !void {
-        // First we disconnect it any connection is already up
-        self.disconnect();
-
-        // Get all nameservers.
-        const servers = try ns.getNameservers(self.allocator, local);
-        defer self.allocator.free(servers);
-        if (servers.len == 0) {
-            return error.NoServerFound;
-        }
-
-        // Prepare all the Sockets
-        var i: usize = 0;
-        var sockets = try self.allocator.alloc(*net.Socket, servers.len);
-        errdefer {
-            for (sockets[0..i]) |sock| {
-                self.allocator.destroy(sock);
-            }
-            self.allocator.free(sockets);
-        }
-
-        // Connect to all servers
-        for (servers) |addr| {
-            const socket = try net.Socket.init(addr, self.options.socket_options);
-            sockets[i] = try self.allocator.create(net.Socket);
-            sockets[i].* = socket;
-            i += 1;
-        }
-        self.sockets = sockets;
-    }
-
-    /// Sends the message to all connected serves.
-    fn send(self: *@This(), message: Message) !void {
-        for (self.sockets.?) |socket| {
-            try message.writeTo(socket.stream());
-            try socket.send();
-        }
-    }
-
-    /// Reads the next (or first) response message.
-    /// It will read from each server interleaved.
-    pub fn next(self: *@This()) !?Message {
-        var count: u8 = 0;
-        // Because we use short timeout, some messages may need to be retried.
-        // This is needed mostly to wait for all nodes to respond to multicast requests (mDNS).
-        // but it will only loop on no response.
-        while (count <= 9) : (count += 1) {
-            // get current server
-            const socket = self.sockets.?[self.curr];
-
-            // receive a message, ignore if it fails, probably a timeout or no response
-            var stream = socket.receive() catch continue;
-
-            // parse the message, if it fails it is probably invalid message so ignore
-            const message = Message.read(self.allocator, &stream) catch continue;
-
-            // use next server
-            self.curr += 1;
-            if (self.curr == self.sockets.?.len) {
-                // if last server, return to first
-                self.curr = 0;
-            }
-
-            // return the message
-            return message;
-        }
-
-        // At this points, there is nothing else to read.
-        self.disconnect();
-        return null;
-    }
-
-    /// Disconnect from all connected servers.
-    fn disconnect(self: *@This()) void {
-        if (self.sockets) |sockets| {
-            for (sockets) |socket| {
-                socket.deinit();
-                self.allocator.destroy(socket);
-            }
-            self.allocator.free(sockets);
-            self.sockets = null;
-        }
-        self.curr = 0;
-    }
-
-    /// Clean-up and disconnect.
-    pub fn deinit(self: *@This()) void {
-        self.disconnect();
-    }
-};
-
-test "query sample" {
-    var client = DNSClient.init(testing.allocator, .{});
-    defer client.deinit();
-
-    // There is probably some better way to test it without depending on real DNS resolution
-    try client.query("example.com", .A);
-    const wantipv4 = try std.net.Address.parseIp4("93.184.215.14", 0);
-
-    const msg = try client.next();
-    defer msg.?.deinit();
-    try testing.expect(msg != null);
-    const gotipv4 = msg.?.records[0].data.ip;
-    try testing.expect(gotipv4.eql(wantipv4));
-
-    while (try client.next()) |msg0| {
-        msg0.deinit();
-    }
-}
 
 /// This is a DNS message, used both for queries and responses.
 pub const Message = struct {
@@ -314,6 +138,7 @@ pub const Header = packed struct {
     /// These are additional records, apart from the requested ones.
     number_of_additional_resource_records: u16 = 0,
 
+    /// Read headers from a stream.
     pub fn read(stream: anytype) !@This() {
         var reader = stream.reader();
         return @This(){
@@ -326,6 +151,7 @@ pub const Header = packed struct {
         };
     }
 
+    /// Write headers to a stream.
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         try writer.writeInt(u16, self.ID, .big);
@@ -350,6 +176,7 @@ pub const Flags = packed struct {
     padding: u3 = 0,
     response_code: ReplyCode = .no_error,
 
+    /// Read flags from a reader.
     pub fn read(reader: anytype) !@This() {
         var flag_bits = try reader.readInt(u16, .big);
         if (builtin.cpu.arch.endian() == .little) {
@@ -358,6 +185,7 @@ pub const Flags = packed struct {
         return @bitCast(flag_bits);
     }
 
+    /// Write flags to a stream.
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         var flag_bits: u16 = @bitCast(self);
@@ -375,6 +203,7 @@ pub const Question = struct {
     resource_type: ResourceType,
     resource_class: ResourceClass = .IN,
 
+    /// Read question from stream.
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
         // There are special rules for reading a name.
         const name = try readName(allocator, stream);
@@ -391,6 +220,7 @@ pub const Question = struct {
         };
     }
 
+    /// Write the Question to a stream.
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         try writeName(writer, self.name);
@@ -398,18 +228,22 @@ pub const Question = struct {
         try writer.writeInt(u16, @intFromEnum(self.resource_class), .big);
     }
 
+    /// Clean-up and free memory.
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.name);
     }
 };
 
+/// The information about a DNS Record
 pub const Record = struct {
     name: []const u8,
     resource_type: ResourceType,
     resource_class: ResourceClass,
+    /// Expiration in econds
     ttl: u32,
     data: RecordData,
 
+    /// Read resource from stream.
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
         const name = try readName(allocator, stream);
         errdefer allocator.free(name);
@@ -433,6 +267,7 @@ pub const Record = struct {
         };
     }
 
+    /// Write resource to stream.
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         try writeName(writer, self.name);
@@ -442,27 +277,39 @@ pub const Record = struct {
         try self.data.writeTo(stream);
     }
 
+    /// Clean-up and free memory.
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         self.data.deinit(allocator);
     }
 };
 
+/// The data that a Record hold,
+/// depends on the resource class.
 pub const RecordData = union(enum) {
+    /// IPv4 or IPv6 address, for records like A or AAAA.
     ip: std.net.Address,
+    /// Services information
     srv: struct {
         priority: u16,
         weight: u16,
         port: u16,
+        /// Domain name like
         target: []const u8,
     },
+    /// For TXT records, a list of strings
     txt: []const []const u8,
+    /// For PTR, likely a new domain, used in dns-sd for example.
+    /// Works like a domain name
     ptr: []const u8,
+    /// For other types, cotains the raw uninterpreted data.
     raw: []const u8,
 
+    /// Read the record data from stream, need to know the resource type.
     pub fn read(allocator: std.mem.Allocator, resource_type: ResourceType, stream: anytype) !@This() {
         var reader = stream.reader();
 
+        // Makes we leave the stream at the end of the data.
         const len = try reader.readInt(u16, .big);
         const pos = try stream.getPos();
         defer stream.seekTo(len + pos) catch unreachable;
@@ -500,7 +347,7 @@ pub const RecordData = union(enum) {
                     txts.deinit();
                 }
 
-                // TODO: split
+                // TODO: split?
                 var total: usize = 0;
                 while (total < len) {
                     const txt_len = try reader.readByte();
@@ -523,6 +370,7 @@ pub const RecordData = union(enum) {
         }
     }
 
+    /// Write the resource data to a stream.
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         switch (self) {
@@ -546,6 +394,7 @@ pub const RecordData = union(enum) {
         }
     }
 
+    /// Clean-up and free memory.
     pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
         switch (self) {
             .ip => {},
@@ -640,8 +489,10 @@ test "Write a name" {
     try testing.expectEqualStrings("\x03www\x07example\x03com\x00", written);
 }
 
+/// If the message is a query (like question) or a reply (answer)
 pub const QueryOrReply = enum(u1) { query, reply };
 
+/// Type of message
 pub const Opcode = enum(u4) {
     query = 0,
     iquery = 1,
@@ -649,6 +500,7 @@ pub const Opcode = enum(u4) {
     _,
 };
 
+/// Possible reply code, used mainly to identify errors
 pub const ReplyCode = enum(u4) {
     no_error = 0,
     format_error = 1,
@@ -663,15 +515,25 @@ pub const ReplyCode = enum(u4) {
     _,
 };
 
+/// Resource Type of a Record
 pub const ResourceType = enum(u16) {
+    /// Host Address
     A = 1,
+    /// Authorittive nameserver
     NS = 2,
+    /// Canonical name for an alias
     CNAME = 5,
+    /// Start of a zone of Authority
     SOA = 6,
+    /// Domain name pointer
     PTR = 12,
+    /// Mail exchange
     MX = 15,
+    /// text strings
     TXT = 16,
+    /// IP6 Address
     AAAA = 28,
+    /// Server Selection
     SRV = 33,
 
     AFSDB = 18,
@@ -714,7 +576,9 @@ pub const ResourceType = enum(u16) {
     _,
 };
 
+/// Resource class of a Record
 pub const ResourceClass = enum(u16) {
+    /// Internet
     IN = 1,
     _,
 };
@@ -841,3 +705,8 @@ pub fn isLocal(address: []const u8) bool {
 pub fn mkid() u16 {
     return @truncate(@as(u64, @bitCast(std.time.timestamp())));
 }
+
+/// Query to find all local network services
+pub const mdns_services_query = "_services._dns-sd._udp.local";
+/// Resource Type for local network services
+pub const mdns_services_resource_type: ResourceType = .PTR;

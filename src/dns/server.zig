@@ -2,8 +2,6 @@ const std = @import("std");
 const dns = @import("dns.zig");
 const net = @import("socket.zig");
 
-pub const local_services_query = "_services._dns-sd._udp.local";
-pub const resource_type: dns.ResourceType = .PTR;
 
 pub const Announcer = struct {
     allocator: std.mem.Allocator,

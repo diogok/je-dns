@@ -10,8 +10,8 @@ pub fn build(b: *std.Build) void {
 
     const artifacts = [_][]const u8{
         "example",
-        "service_list",
-        "announcer",
+        "servicelist",
+        "myservice",
     };
 
     for (artifacts[0..]) |artifact| {

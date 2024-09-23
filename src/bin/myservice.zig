@@ -9,13 +9,5 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    var client = dns.DNSClient.init(allocator, .{});
-    defer client.deinit();
-
-    try client.query(dns.local_services_query, dns.resource_type);
-
-    while (try client.next()) |message| {
-        defer message.deinit();
-        dnslog.logMessage(log.info, message);
-    }
+    var announcer = dns.Announcer.init(allocator);
 }
