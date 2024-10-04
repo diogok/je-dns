@@ -9,7 +9,7 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    var iter = try dns.queryMDNS(
+    var iter = try dns.query(
         dns.mdns_services_query,
         dns.mdns_services_resource_type,
         .{},
