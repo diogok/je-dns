@@ -11,15 +11,14 @@ pub fn main() !void {
 
     var client = dns.DNSClient.init(allocator, .{});
     defer client.deinit();
-    try client.query("example.com", .A);
 
+    try client.query("example.com", .A);
     while (try client.next()) |message| {
         defer message.deinit();
         dnslog.logMessage(log.info, message);
     }
 
     try client.query("example.com", .AAAA);
-
     while (try client.next()) |message| {
         defer message.deinit();
         dnslog.logMessage(log.info, message);

@@ -1,6 +1,8 @@
 # Just Enought DNS
 
-This library implements just enought DNS to work with mDNS (Multicast DNS, resolving ``local` names) and DNS-SD (DNS Service discovery, finding services on your network).
+This library implements just enought DNS to work with mDNS (Multicast DNS, resolving `local` names) and DNS-SD (DNS Service discovery, finding services on your network).
+
+It has a Client and a Server.
 
 For usage see the [documentation](https://diogok.github.io/je-dns) or the binaries at [src/bin](src/bin).
 

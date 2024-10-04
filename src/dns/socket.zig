@@ -20,103 +20,60 @@ pub const Socket = struct {
     address: std.net.Address,
     handle: std.posix.socket_t,
 
-    /// Works with 512 bytes packets.
-    recv_buffer: [512]u8 = undefined,
-    send_buffer: [512]u8 = undefined,
-
-    /// Stream to prepare data for sending.
-    /// Access via stream() function.
-    send_stream: ?Stream,
-
     /// Timeout in milliseconds.
-    timeout: u32,
+    timeout_in_millis: u32,
 
     /// Creates a new socket object.
-    /// It will attempt to connect or bind as needed.
     /// Should call deinit after usage.
     pub fn init(address: std.net.Address, options: Options) !@This() {
-        // Creates the socket handler
         const handle = try std.posix.socket(
             address.any.family,
             std.posix.SOCK.DGRAM,
             0,
         );
 
-        // Prepare the Socket struct
-        var self = @This(){
+        try setTimeout(handle, options.timeout_in_millis);
+
+        return @This(){
             .address = address,
             .handle = handle,
-            .send_stream = null,
-            .timeout = options.timeout_in_millis,
+            .timeout_in_millis = options.timeout_in_millis,
         };
-
-        // Creates the stream to send data
-        const send_stream = std.io.fixedBufferStream(&self.send_buffer);
-        self.send_stream = send_stream;
-
-        try setTimeout(self.handle, self.timeout);
-
-        if (isMulticast(self.address)) {
-            // For multicast addresses we bind the the "any" address.
-            // It also setup several multicast options
-            try self.bind();
-        } else {
-            // For the rest we connect simply
-            try self.connect();
-        }
-
-        return self;
     }
 
-    /// Disconnect the socket.
-    pub fn deinit(self: *@This()) void {
+    /// Closes the socket.
+    pub fn deinit(self: @This()) void {
         std.posix.close(self.handle);
     }
 
-    /// Send the data accumulated on Stream.
-    /// First calee should use the stream() function, and accumulate all data.
-    /// Data (up to 512 bytes) is sent in single packet.
-    /// Resets the Stream.
+    /// Send the data (up to 512 bytes) in single packet.
     /// Timeout applies.
-    pub fn send(self: *@This()) !void {
-        // Get the data from the internal stream.
-        // For UDP, data should be sent in a single packet.
-        const bytes = self.stream().getWritten();
-
-        if (isMulticast(self.address)) {
-            // for multicast we use sendto.
-            // I don't remember why.
-            _ = try std.posix.sendto(
-                self.handle,
-                bytes,
-                0,
-                &self.address.any,
-                self.address.getOsSockLen(),
-            );
-        } else {
-            // For unicaset we just use send.
-            _ = try std.posix.send(self.handle, bytes, 0);
-        }
-
-        // Empties the internal buffer.
-        self.stream().reset();
+    pub fn sendBytes(self: @This(), bytes: []const u8) !void {
+        std.debug.assert(bytes.len <= 512);
+        _ = try std.posix.sendto(
+            self.handle,
+            bytes,
+            0,
+            &self.address.any,
+            self.address.getOsSockLen(),
+        );
     }
 
     /// Receives the next message on the socket.
     /// On timeout, returns an error.
     /// Will call Select or Poll to wait for messages.
-    pub fn receive(self: *@This()) !Stream {
+    pub fn receive(self: @This(), buffer: []u8) ![]const u8 {
         // First wait for messages to be available.
         try self.wait();
-        // Read the message into the internal buffer.
-        const len = try std.posix.recv(self.handle, &self.recv_buffer, 0);
-        // Return a stream with the buffered data.
-        return std.io.fixedBufferStream(self.recv_buffer[0..len]);
+        // Read the message into the buffer.
+        const len = try std.posix.recv(self.handle, buffer, 0);
+        // Return the received data from the buffer.
+        return buffer[0..len];
     }
 
     /// Wait for a message to be available.
     /// Uses select on windows and poll on other OSes.
-    fn wait(self: *@This()) !void {
+    fn wait(self: @This()) !void {
         if (builtin.os.tag == .windows) {
             var fd_set = std.mem.zeroes(std.os.windows.ws2_32.fd_set);
             fd_set.fd_count = 1;
@@ -135,7 +92,7 @@ pub const Socket = struct {
             var fds = [_]std.posix.pollfd{
                 .{ .fd = self.handle, .events = 1, .revents = 0 },
             };
-            const r = try std.posix.poll(&fds, @as(i32, @intCast(self.timeout)));
+            const r = try std.posix.poll(&fds, @as(i32, @intCast(self.timeout_in_millis)));
             if (r == 0) {
                 return error.Timeout;
             }
@@ -143,30 +100,20 @@ pub const Socket = struct {
         return;
     }
 
-    /// Return the internal stream to send data.
-    pub fn stream(self: *@This()) *Stream {
-        return &self.send_stream.?;
-    }
-
-    fn bind(self: *@This()) !void {
+    /// Bind to specific address. Can be the same of self.address.
+    pub fn bind(self: @This()) !void {
         try enableReuse(self.handle);
-        const bind_addr = try getBindAddress(self.address);
+        const bind_address = try getBindAddress(self.address);
         try std.posix.bind(
             self.handle,
-            &bind_addr.any,
-            bind_addr.getOsSockLen(),
+            &bind_address.any,
+            bind_address.getOsSockLen(),
         );
-        if (isMulticast(self.address)) {
-            try setupMulticast(self.handle, self.address, .{});
-        }
     }
 
-    fn connect(self: *@This()) !void {
-        try std.posix.connect(
-            self.handle,
-            &self.address.any,
-            self.address.getOsSockLen(),
-        );
+    /// Setup multicast for this socket.
+    pub fn multicast(self: @This()) !void {
+        try setupMulticast(self.handle, self.address, .{});
     }
 };
 
@@ -187,11 +134,10 @@ pub fn isMulticast(address: std.net.Address) bool {
     }
 }
 
-/// Set send and receive timeout on he socket.
+/// Set send and receive timeout on the socket.
 pub fn setTimeout(fd: std.posix.socket_t, millis: u32) !void {
     const timeout = makeTimevalue(millis);
     const value: []const u8 = std.mem.toBytes(timeout)[0..];
-
     try std.posix.setsockopt(
         fd,
         std.posix.SOL.SOCKET,
@@ -219,17 +165,7 @@ pub fn makeTimevalue(millis: u32) std.posix.timeval {
 
 /// Enable reuse of a socket, so multiple process can bind to it.
 /// Required for multicast, recommended for the rest.
-/// Not used for connecting, only for binding.
 pub fn enableReuse(sock: std.posix.socket_t) !void {
-    if (builtin.os.tag == .linux) {
-        // Not sure if this is actually necessery, might be redundant.
-        try std.posix.setsockopt(
-            sock,
-            std.posix.SOL.SOCKET,
-            std.posix.SO.REUSEPORT,
-            &std.mem.toBytes(@as(c_int, 1)),
-        );
-    }
     try std.posix.setsockopt(
         sock,
         std.posix.SOL.SOCKET,
@@ -242,9 +178,10 @@ pub fn enableReuse(sock: std.posix.socket_t) !void {
 pub const MulticastOptions = struct {
     /// How many network hops can the message go.
     /// 0 is only the original machine.
-    /// 1 is your machine + 1, which usually means your direct network.
+    /// 1 is original machine + 1, which usually means your direct network (eth, wi-fi, vpn).
     hops: u8 = 1,
     /// Loop means the sender will receive it's own messages.
+    /// Useful to debug.
     loop: bool = true,
 };
 
@@ -370,10 +307,10 @@ pub fn getBindAddress(address: std.net.Address) !std.net.Address {
 pub fn getAny(address: std.net.Address) !std.net.Address {
     switch (address.any.family) {
         std.posix.AF.INET => {
-            return try std.net.Address.parseIp4("0.0.0.0", 5353);
+            return std.net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, address.getPort());
         },
         std.posix.AF.INET6 => {
-            return try std.net.Address.parseIp6("::", 5353);
+            return std.net.Address.initIp6(std.mem.zeroes([16]u8), address.getPort(), 0, 0);
         },
         else => {
             return error.UnkownAddressFamily;
@@ -384,26 +321,32 @@ pub fn getAny(address: std.net.Address) !std.net.Address {
 const testing = std.testing;
 
 test "Socket connect ip4 localhost" {
-    const server = try std.net.Address.parseIp("127.0.0.1", 53);
+    const server = try std.net.Address.parseIp("127.0.0.1", 1234);
     var sock = try Socket.init(server, .{});
+    try sock.bind();
     sock.deinit();
 }
 
 test "Socket connect ip4 multicast" {
     const server = try std.net.Address.parseIp("224.0.0.251", 5353);
     var sock = try Socket.init(server, .{});
+    try sock.bind();
+    try sock.multicast();
     sock.deinit();
 }
 
 test "Socket connect ip6 localhost" {
-    const server = try std.net.Address.parseIp("::1", 53);
+    const server = try std.net.Address.parseIp("::1", 1234);
     var sock = try Socket.init(server, .{});
+    try sock.bind();
     sock.deinit();
 }
 
 test "Socket connect ip6 multicast" {
     const server = try std.net.Address.parseIp("ff02::fb", 5353);
     var sock = try Socket.init(server, .{});
+    try sock.bind();
+    try sock.multicast();
     sock.deinit();
 }
 

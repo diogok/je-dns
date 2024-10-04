@@ -1,0 +1,45 @@
+info(discover_with_me): ┌──────
+info(discover_with_me): │ ID: 0
+info(discover_with_me): │ Type: data.QueryOrReply.reply
+info(discover_with_me): │ Opcode: data.Opcode.query
+info(discover_with_me): │ Authoritative: true
+info(discover_with_me): │ Truncation: false
+info(discover_with_me): │ Recursion desired: false
+info(discover_with_me): │ Recursion available: false
+info(discover_with_me): │ Response code: data.ReplyCode.no_error
+info(discover_with_me): │ Questions: 0
+info(discover_with_me): │ Answers: 1
+info(discover_with_me): │ Authority records: 0
+info(discover_with_me): │ Additional records: 4
+info(discover_with_me): │ => Record 0:
+info(discover_with_me): │ ==> Name: _services._dns-sd._udp.local
+info(discover_with_me): │ ==> Resource type: data.ResourceType.PTR
+info(discover_with_me): │ ==> Resource class: data.ResourceClass.IN
+info(discover_with_me): │ ==> TTL: 120
+info(discover_with_me): │ ==> Data (string): _spotify-connect._tcp.local
+info(discover_with_me): │ => Additional Record 0:
+info(discover_with_me): │ ==> Name: _spotify-connect._tcp.local
+info(discover_with_me): │ ==> Resource type: data.ResourceType.PTR
+info(discover_with_me): │ ==> Resource class: data.ResourceClass.IN
+info(discover_with_me): │ ==> TTL: 120
+info(discover_with_me): │ ==> Data (string): 7d51a5ff75fb7de6._spotify-connect._tcp.local
+info(discover_with_me): │ => Additional Record 1:
+info(discover_with_me): │ ==> Name: 7d51a5ff75fb7de6._spotify-connect._tcp.local
+info(discover_with_me): │ ==> Resource type: data.ResourceType.SRV
+info(discover_with_me): │ ==> Resource class: data.ResourceClass.IN
+info(discover_with_me): │ ==> TTL: 120
+info(discover_with_me): │ ==> Data (service): 0 0 7d51a5ff75fb7de6.local:35517
+info(discover_with_me): │ => Additional Record 2:
+info(discover_with_me): │ ==> Name: 7d51a5ff75fb7de6._spotify-connect._tcp.local
+info(discover_with_me): │ ==> Resource type: data.ResourceType.TXT
+info(discover_with_me): │ ==> Resource class: data.ResourceClass.IN
+info(discover_with_me): │ ==> TTL: 120
+info(discover_with_me): │ ==> Data (text): 1
+info(discover_with_me): │ ===> CPath=/zc
+info(discover_with_me): │ => Additional Record 3:
+info(discover_with_me): │ ==> Name: 7d51a5ff75fb7de6.local
+info(discover_with_me): │ ==> Resource type: data.ResourceType.A
+info(discover_with_me): │ ==> Resource class: data.ResourceClass.IN
+info(discover_with_me): │ ==> TTL: 120
+info(discover_with_me): │ ==> Data (IP): 192.168.0.111:0
+info(discover_with_me): └──────

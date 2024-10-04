@@ -588,6 +588,7 @@ test "Write a message" {
     var stream = std.io.fixedBufferStream(&buffer);
 
     var message = Message{};
+    message.header.ID = 38749;
     message.questions = &[_]Question{
         .{
             .name = "example.com",
@@ -602,7 +603,7 @@ test "Write a message" {
 
     const written = stream.getWritten();
     const example_query = [_]u8{
-        0, 0, // skip id because it is generated
+        0b10010111, 0b1011101, // ID
         1, 128, // flags: u16  = 110000000
         0, 1, //  number of questions :u16 = 1
         0, 0, 0, 0, 0, 0, //  other "number of"
@@ -610,7 +611,7 @@ test "Write a message" {
         3, 'c', 'o', 'm', 0, // last label of name
         0, 1, 0, 1, // question type = A, class = IN
     };
-    try testing.expectEqualSlices(u8, example_query[2..], written[2..]);
+    try testing.expectEqualSlices(u8, example_query[0..], written[0..]);
 }
 
 test "Read a message" {
@@ -706,7 +707,12 @@ pub fn mkid() u16 {
     return @truncate(@as(u64, @bitCast(std.time.timestamp())));
 }
 
-/// Query to find all local network services
+/// Query to find all local network services.
 pub const mdns_services_query = "_services._dns-sd._udp.local";
-/// Resource Type for local network services
+/// Resource Type for local network services.
 pub const mdns_services_resource_type: ResourceType = .PTR;
+
+/// Multicast IPv6 Address for mDNS.
+pub const mdns_ipv6_address = std.net.Address.initIp6([16]u8{ 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb }, 5353, 0, 0);
+/// Multicast IPv4 Address for mDNS.
+pub const mdns_ipv4_address = std.net.Address.initIp4([4]u8{ 224, 0, 0, 251 }, 5353);
