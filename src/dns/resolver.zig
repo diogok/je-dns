@@ -32,7 +32,7 @@ pub const ResolverIterrator = struct {
     pub fn nextAnswer(self: *@This()) ?data.Record {
         while (self.i < self.l.len) : (self.i += 1) {
             return data.Record{
-                .name = mdns_services_query,
+                .name = self.q,
                 .resource_class = .IN,
                 .resource_type = .PTR,
                 .data = .{
@@ -66,7 +66,7 @@ test "Resolver" {
 
     const resolver = Resolver.init(my_services);
     {
-        var iter = resolver.query(mdns_services_query, mdns_services_resource_type);
+        var iter = resolver.query(data.mdns_services_query, data.mdns_services_resource_type);
 
         const r0 = iter.nextAnswer();
         try testing.expectEqualStrings("_http._tcp.local", r0.?.data.PTR);
@@ -76,8 +76,3 @@ test "Resolver" {
         try testing.expect(r2 == null);
     }
 }
-
-/// Query to find all local network services
-pub const mdns_services_query = "_services._dns-sd._udp.local";
-/// Resource Type for local network services
-pub const mdns_services_resource_type: data.ResourceType = .PTR;

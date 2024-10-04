@@ -6,17 +6,35 @@ const testing = std.testing;
 const data = @import("data.zig");
 const net = @import("socket.zig");
 
-/// Options for DNSClient.
-pub const mDNSClientOptions = struct {
+/// Options for DNS Queries.
+pub const QueryOptions = struct {
     socket_options: net.Options = .{
         .timeout_in_millis = 100,
     },
 };
 
-/// mDNSClient, for querying and handling mDNS requests.
-/// Works for IPv4 and IPv6.
-pub const mDNSClient = struct {
-    allocator: std.mem.Allocator,
+pub fn queryMDNS(
+    name: []const u8,
+    resource_type: data.ResourceType,
+    options: QueryOptions,
+) !MessageIterator {
+    var self = MessageIterator{};
+
+    self.sockets[0] = try net.Socket.init(data.mdns_ipv6_address, options.socket_options);
+    self.sockets[1] = try net.Socket.init(data.mdns_ipv4_address, options.socket_options);
+
+    for (self.sockets) |socket| {
+        try socket.bind();
+        try socket.multicast();
+    }
+
+    try self.send(name, resource_type);
+
+    return self;
+}
+
+pub const MessageIterator = struct {
+    /// Sockets to send query and read messages.
     sockets: [2]net.Socket,
 
     /// Current socket in use.
@@ -28,26 +46,8 @@ pub const mDNSClient = struct {
     /// internal buffer
     buffer: [512]u8 = undefined,
 
-    /// Creates a new mDNSClient with given options.
-    pub fn init(allocator: std.mem.Allocator, options: mDNSClientOptions) !@This() {
-        var self = @This(){
-            .allocator = allocator,
-            .sockets = undefined,
-        };
-
-        self.sockets[0] = try net.Socket.init(data.mdns_ipv6_address, options.socket_options);
-        self.sockets[1] = try net.Socket.init(data.mdns_ipv4_address, options.socket_options);
-
-        for (self.sockets) |socket| {
-            try socket.bind();
-            try socket.multicast();
-        }
-
-        return self;
-    }
-
     /// Query for some DNS records.
-    pub fn query(self: *@This(), name: []const u8, resource_type: data.ResourceType) !void {
+    pub fn send(self: *@This(), name: []const u8, resource_type: data.ResourceType) !void {
         // reset socket reading
         self.current_socket = 0;
 
@@ -60,7 +60,6 @@ pub const mDNSClient = struct {
             .allocator = null,
             .header = .{
                 .ID = self.current_message_id,
-                // Only one query
                 .number_of_questions = 1,
             },
             .questions = &[_]data.Question{
@@ -83,7 +82,7 @@ pub const mDNSClient = struct {
     }
 
     /// Reads the next response message.
-    pub fn next(self: *@This()) !?data.Message {
+    pub fn next(self: *@This(), allocator: std.mem.Allocator) !?data.Message {
         // loop until we find a reply, try all sockets or have no more messages
         while (true) {
             // check if we already read all sockets
@@ -109,7 +108,7 @@ pub const mDNSClient = struct {
             // parse the message
             // if it fails it is probably invalid message
             // so continue to try next message
-            const message = data.Message.read(self.allocator, &stream) catch continue;
+            const message = data.Message.read(allocator, &stream) catch continue;
 
             if (message.header.flags.query_or_reply != .reply) {
                 // Not a reply, continue
@@ -136,11 +135,10 @@ pub const mDNSClient = struct {
     }
 };
 
-test "query sample" {
-    var client = try mDNSClient.init(testing.allocator, .{});
-    defer client.deinit();
-    try client.query(data.mdns_services_query, data.mdns_services_resource_type);
-    while (try client.next()) |msg| {
+test "query mdns service list" {
+    var iter = try queryMDNS(data.mdns_services_query, data.mdns_services_resource_type, .{});
+    defer iter.deinit();
+    while (try iter.next(testing.allocator)) |msg| {
         msg.deinit();
     }
 }
