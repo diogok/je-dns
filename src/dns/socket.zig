@@ -62,13 +62,13 @@ pub const Socket = struct {
     /// Receives the next message on the socket.
     /// On timeout, returns an error.
     /// Will call Select or Poll to wait for messages.
-    pub fn receive(self: @This(), buffer: []u8) ![]const u8 {
+    pub fn receive(self: @This(), buffer: []u8) !usize {
         // First wait for messages to be available.
         try self.wait();
         // Read the message into the buffer.
         const len = try std.posix.recv(self.handle, buffer, 0);
-        // Return the received data from the buffer.
-        return buffer[0..len];
+        // Return the length of received data.
+        return len;
     }
 
     /// Wait for a message to be available.

@@ -25,6 +25,9 @@ pub const mDNSClient = struct {
     /// Current message id.
     current_message_id: u16 = 0,
 
+    /// internal buffer
+    buffer: [512]u8 = undefined,
+
     /// Creates a new mDNSClient with given options.
     pub fn init(allocator: std.mem.Allocator, options: mDNSClientOptions) !@This() {
         var self = @This(){
@@ -69,8 +72,7 @@ pub const mDNSClient = struct {
         };
 
         // get message bytes
-        var buffer: [512]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
+        var stream = std.io.fixedBufferStream(&self.buffer);
         try message.writeTo(&stream);
         const bytes = stream.getWritten();
 
@@ -82,6 +84,7 @@ pub const mDNSClient = struct {
 
     /// Reads the next response message.
     pub fn next(self: *@This()) !?data.Message {
+        // loop until we find a reply, try all sockets or have no more messages
         while (true) {
             // check if we already read all sockets
             if (self.current_socket >= self.sockets.len) {
@@ -92,10 +95,8 @@ pub const mDNSClient = struct {
             // get current server
             const socket = self.sockets[self.current_socket];
 
-            var buffer: [512]u8 = undefined;
-
             // receive a message
-            _ = socket.receive(&buffer) catch {
+            const len = socket.receive(&self.buffer) catch {
                 // if this is a timeout or other error
                 // it probably means there is no more message on this socket
                 // so we move on to next socket
@@ -103,7 +104,7 @@ pub const mDNSClient = struct {
                 continue;
             };
 
-            var stream = std.io.fixedBufferStream(&buffer);
+            var stream = std.io.fixedBufferStream(self.buffer[0..len]);
 
             // parse the message
             // if it fails it is probably invalid message
