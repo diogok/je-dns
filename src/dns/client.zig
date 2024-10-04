@@ -7,6 +7,8 @@ const data = @import("data.zig");
 const net = @import("socket.zig");
 const nameservers = @import("nameservers.zig");
 
+const num_sockets = 2;
+
 /// Options for DNS Queries.
 pub const QueryOptions = struct {
     socket_options: net.Options = .{
@@ -39,8 +41,9 @@ fn queryDNS(
 ) !ReplyIterator {
     const addresses = try nameservers.getNameservers();
 
-    var sockets: [addresses.len]?net.Socket = undefined;
-    for (addresses, 0..) |address, i| {
+    var sockets: [num_sockets]?net.Socket = std.mem.zeroes([num_sockets]?net.Socket);
+
+    for (addresses, 0..@min(num_sockets, addresses.len)) |address, i| {
         if (address) |addr| {
             sockets[i] = try net.Socket.init(addr, options.socket_options);
         }
@@ -62,7 +65,7 @@ fn queryMDNS(
     resource_type: data.ResourceType,
     options: QueryOptions,
 ) !ReplyIterator {
-    var sockets: [2]?net.Socket = undefined;
+    var sockets: [num_sockets]?net.Socket = std.mem.zeroes([num_sockets]?net.Socket);
 
     sockets[0] = try net.Socket.init(data.mdns_ipv6_address, options.socket_options);
     sockets[1] = try net.Socket.init(data.mdns_ipv4_address, options.socket_options);
