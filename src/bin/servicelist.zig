@@ -9,23 +9,27 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    var client = try dns.mDNSClient.init(allocator, .{});
-    defer client.deinit();
-
-    try client.query(dns.mdns_services_query, dns.mdns_services_resource_type);
-    while (try client.next()) |message| {
+    var iter = try dns.queryMDNS(
+        dns.mdns_services_query,
+        dns.mdns_services_resource_type,
+        .{},
+    );
+    defer iter.deinit();
+    while (try iter.next(allocator)) |message| {
         defer message.deinit();
         dnslog.logMessage(log.info, message);
     }
 
-    try client.query("_spotify-connect._tcp.local", dns.mdns_services_resource_type);
-    while (try client.next()) |message| {
+    var iter1 = try dns.query("_spotify-connect._tcp.local", dns.mdns_services_resource_type, .{});
+    defer iter1.deinit();
+    while (try iter1.next(allocator)) |message| {
         defer message.deinit();
         dnslog.logMessage(log.info, message);
     }
 
-    try client.query("_hello._tcp.local", dns.mdns_services_resource_type);
-    while (try client.next()) |message| {
+    var iter2 = try dns.query("_hello._tcp.local", dns.mdns_services_resource_type, .{});
+    defer iter2.deinit();
+    while (try iter2.next(allocator)) |message| {
         defer message.deinit();
         dnslog.logMessage(log.info, message);
     }

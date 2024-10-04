@@ -13,6 +13,11 @@ pub const QueryOptions = struct {
     },
 };
 
+pub const query = queryMDNS;
+
+/// Sends a query to mDNS.
+/// Returns a MessageIterator to read the response.
+/// Most deinit the returned MessageIterator.
 pub fn queryMDNS(
     name: []const u8,
     resource_type: data.ResourceType,
@@ -33,9 +38,10 @@ pub fn queryMDNS(
     return self;
 }
 
+/// Iterates over all messages available on the sockets.
 pub const MessageIterator = struct {
     /// Sockets to send query and read messages.
-    sockets: [2]net.Socket,
+    sockets: [2]net.Socket = undefined,
 
     /// Current socket in use.
     current_socket: usize = 0,
