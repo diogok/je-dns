@@ -149,7 +149,12 @@ const WindowsDNSServersIterator = struct {
         return null;
     }
 
-    pub fn deinit(_: *@This()) void {}
+    pub fn deinit(self: *@This()) void {
+        const r = HeapFree(GetProcessHeap(), 0, &self.info);
+        if (r != 0) {
+            std.debug.print("HeapFree failed to free nameservers: {d}\n", .{r});
+        }
+    }
 };
 
 test "Windows DNS Servers" {
@@ -187,3 +192,6 @@ const IP_ADDR_STRING = extern struct {
 const IP_ADDRESS_STRING = extern struct {
     String: [16]u8,
 };
+
+pub extern "kernel32" fn GetProcessHeap() callconv(.C) ?*anyopaque;
+pub extern "kernel32" fn HeapFree(hHeap: ?*anyopaque, dwFlags: u32, lpMem: ?*anyopaque) callconv(.C) u32;
