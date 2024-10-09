@@ -159,7 +159,7 @@ test "Windows DNS Servers" {
     // Not sure what to test, just making sure it can execute.
     var iter = try WindowsDNSServersIterator.init();
     defer iter.deinit();
-    while (try iter.next()) {}
+    while (try iter.next()) |_| {}
 }
 
 // These is the API and structs used for Windows
