@@ -7,7 +7,7 @@ const data = @import("data.zig");
 const net = @import("socket.zig");
 const nameservers = @import("nameservers.zig");
 
-const num_sockets = 2;
+const num_sockets = 8;
 
 /// Options for DNS Queries.
 pub const QueryOptions = struct {
@@ -129,7 +129,7 @@ fn sendQuery(sockets: []?net.Socket, name: []const u8, resource_type: data.Resou
 /// Iterates over all messages available on the sockets.
 pub const ReplyIterator = struct {
     /// Sockets to send query and read messages.
-    sockets: [2]?net.Socket = undefined,
+    sockets: [num_sockets]?net.Socket = undefined,
 
     /// Current socket in use.
     current_socket: usize = 0,
@@ -217,8 +217,9 @@ test "query regular dns query" {
     const wantipv4 = try std.net.Address.parseIp4("93.184.215.14", 0);
 
     const msg = try iter.next(testing.allocator);
-    defer msg.?.deinit();
     try testing.expect(msg != null);
+    defer msg.?.deinit();
+
     const gotipv4 = msg.?.records[0].data.ip;
     try testing.expect(gotipv4.eql(wantipv4));
 

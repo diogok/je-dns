@@ -108,50 +108,61 @@ test "iter resolv.conf" {
 // Windows API and Structs for Nameservers
 
 const WindowsDNSServersIterator = struct {
-    info: PFIXED_INFO,
-    curr: ?IP_ADDR_STRING,
+    src: *IP_ADAPTER_ADDRESSES,
+    adapter: *IP_ADAPTER_ADDRESSES,
+    dns_server: ?*IP_ADDRESS,
 
     pub fn init() !@This() {
         // prepare an empty struct to receive the data
-        var info: PFIXED_INFO = std.mem.zeroes(PFIXED_INFO);
-        var buf_len: u32 = @sizeOf(PFIXED_INFO);
-        // get windows to fill the struct
-        const ret = GetNetworkParams(&info, &buf_len);
+        // let windows figure out the size needed
+        var buf_len: u32 = 0;
+        _ = GetAdaptersAddresses(0, 0, null, null, &buf_len);
+        // alloc with windows
+        const buffer = HeapAlloc(GetProcessHeap(), 0, buf_len);
+        const adapter: *IP_ADAPTER_ADDRESSES = @ptrCast(@alignCast(buffer.?));
+
+        // fill the struct
+        const ret = GetAdaptersAddresses(0, 0, null, adapter, &buf_len);
+
         if (ret != 0) {
-            std.debug.print("GetNetworkParams error {d}\n", .{ret});
-            return error.GetNetworkParamsError;
+            std.debug.print("GetAdaptersAddresses error {d}\n", .{ret});
+            return error.GetAdaptersAddressesError;
         }
 
         return @This(){
-            .info = info,
-            .curr = info.DnsServerList,
+            .src = adapter,
+            .adapter = adapter,
+            .dns_server = adapter.FirstDnsServerAddress,
         };
     }
 
     pub fn next(self: *@This()) !?std.net.Address {
-        if (self.curr) |server| {
-            var len: usize = 0;
-            while (server.IpAddress.String[len] != 0) : (len += 1) {}
-
-            // parse address
-            const addr = server.IpAddress.String[0..len];
-            const address = try std.net.Address.parseIp(addr, 53);
-
-            // check if there are more servers
-            if (server.Next) |next_server| {
-                self.curr = next_server.*;
-            } else {
-                self.curr = null;
+        if (self.dns_server) |server| {
+            if (server.Address.lpSockaddr) |sock_addr| {
+                // parse address
+                const sockaddr: *align(4) const std.os.windows.ws2_32.sockaddr = @ptrCast(@alignCast(sock_addr));
+                var address = std.net.Address.initPosix(sockaddr);
+                address.setPort(53);
+                // check if there are more servers
+                if (server.Next) |next_server| {
+                    self.dns_server = next_server;
+                } else {
+                    self.dns_server = null;
+                    // check if there are more adapters
+                    if (self.adapter.Next) |next_adapter| {
+                        self.adapter = next_adapter;
+                        self.dns_server = next_adapter.FirstDnsServerAddress;
+                    }
+                }
+                return address;
             }
-
-            return address;
         }
         return null;
     }
 
     pub fn deinit(self: *@This()) void {
-        const r = HeapFree(GetProcessHeap(), 0, &self.info);
-        if (r != 0) {
+        const r = HeapFree(GetProcessHeap(), 0, self.src);
+        if (r == 0) {
             std.debug.print("HeapFree failed to free nameservers: {d}\n", .{r});
         }
     }
@@ -164,34 +175,114 @@ test "Windows DNS Servers" {
     // Not sure what to test, just making sure it can execute.
     var iter = try WindowsDNSServersIterator.init();
     defer iter.deinit();
-    while (try iter.next()) |_| {}
+    var i: usize = 0;
+    while (try iter.next()) |_| {
+        i += 1;
+    }
+    try testing.expect(i >= 1);
 }
 
-// These is the API and structs used for Windows
-extern "iphlpapi" fn GetNetworkParams(pFixedInfo: ?*PFIXED_INFO, pOutBufLen: ?*u32) callconv(.C) u32;
+extern "kernel32" fn GetProcessHeap() callconv(.C) ?*anyopaque;
+extern "kernel32" fn HeapAlloc(hHeap: ?*anyopaque, dwFlags: u32, dwBytes: usize) callconv(.C) ?*anyopaque;
+extern "kernel32" fn HeapFree(hHeap: ?*anyopaque, dwFlags: u32, lpMem: ?*anyopaque) callconv(.C) u32;
 
-const PFIXED_INFO = extern struct {
-    HostName: [132]u8,
-    DomainName: [132]u8,
-    CurrentDnsServer: ?*IP_ADDR_STRING,
-    DnsServerList: IP_ADDR_STRING,
-    NodeType: u32,
-    ScopeId: [260]u8,
-    EnableRouting: u32,
-    EnableProxy: u32,
-    EnableDns: u32,
+extern "iphlpapi" fn GetAdaptersAddresses(
+    Family: u32,
+    Flags: u32,
+    Reserved: ?*anyopaque,
+    AdapterAddresses: ?*IP_ADAPTER_ADDRESSES,
+    SizePointer: ?*u32,
+) callconv(.C) u32;
+
+const IP_ADAPTER_ADDRESSES = extern struct {
+    Anonymous1: u64,
+    Next: ?*IP_ADAPTER_ADDRESSES,
+    AdapterName: ?[*]u8,
+    FirstUnicastAddress: ?*extern struct {
+        IpAddress: IP_ADDRESS,
+        PrefixOrigin: i32,
+        SuffixOrigin: i32,
+        DadState: i32,
+        ValidLifetime: u32,
+        PreferredLifetime: u32,
+        LeaseLifetime: u32,
+        OnLinkPrefixLength: u8,
+    },
+    FirstAnycastAddress: ?*IP_ADDRESS,
+    FirstMulticastAddress: ?*IP_ADDRESS,
+    FirstDnsServerAddress: ?*IP_ADDRESS,
+    DnsSuffix: ?[*]u16,
+    Description: ?[*]u16,
+    FriendlyName: ?[*]u16,
+    PhysicalAddress: [8]u8,
+    PhysicalAddressLength: u32,
+    Anonymous2: u32,
+    Mtu: u32,
+    IfType: u32,
+    OperStatus: enum(i32) {
+        Up = 1,
+        Down = 2,
+        Testing = 3,
+        Unknown = 4,
+        Dormant = 5,
+        NotPresent = 6,
+        LowerLayerDown = 7,
+    },
+    Ipv6IfIndex: u32,
+    ZoneIndices: [16]u32,
+    FirstPrefix: ?*extern struct {
+        IpAddress: IP_ADDRESS,
+        PrefixLength: u32,
+    },
+    TransmitLinkSpeed: u64,
+    ReceiveLinkSpeed: u64,
+    FirstWinsServerAddress: ?*IP_ADDRESS,
+    FirstGatewayAddress: ?*IP_ADDRESS,
+    Ipv4Metric: u32,
+    Ipv6Metric: u32,
+    Luid: u64,
+    Dhcpv4Server: SOCKET_ADDRESS,
+    CompartmentId: u32,
+    NetworkGuid: u32,
+    ConnectionType: enum(i32) {
+        DEDICATED = 1,
+        PASSIVE = 2,
+        DEMAND = 3,
+        MAXIMUM = 4,
+    },
+    TunnelType: enum(i32) {
+        NONE = 0,
+        OTHER = 1,
+        DIRECT = 2,
+        @"6TO4" = 11,
+        ISATAP = 13,
+        TEREDO = 14,
+        IPHTTPS = 15,
+    },
+    Dhcpv6Server: SOCKET_ADDRESS,
+    Dhcpv6ClientDuid: [130]u8,
+    Dhcpv6ClientDuidLength: u32,
+    Dhcpv6Iaid: u32,
+    FirstDnsSuffix: ?*IP_ADAPTER_DNS_SUFFIX,
 };
 
-const IP_ADDR_STRING = extern struct {
-    Next: ?*IP_ADDR_STRING,
-    IpAddress: IP_ADDRESS_STRING,
-    IpMask: IP_ADDRESS_STRING,
-    Context: u32,
+pub const IP_ADDRESS = extern struct {
+    Anonymous: u64,
+    Next: ?*IP_ADDRESS,
+    Address: SOCKET_ADDRESS,
 };
 
-const IP_ADDRESS_STRING = extern struct {
-    String: [16]u8,
+pub const SOCKET_ADDRESS = extern struct {
+    lpSockaddr: ?*SOCKADDR,
+    iSockaddrLength: i32,
 };
 
-pub extern "kernel32" fn GetProcessHeap() callconv(.C) ?*anyopaque;
-pub extern "kernel32" fn HeapFree(hHeap: ?*anyopaque, dwFlags: u32, lpMem: ?*anyopaque) callconv(.C) u32;
+pub const SOCKADDR = extern struct {
+    sa_family: u16,
+    sa_data: [14]u8,
+};
+
+pub const IP_ADAPTER_DNS_SUFFIX = extern struct {
+    Next: ?*IP_ADAPTER_DNS_SUFFIX,
+    String: [256]u16,
+};
