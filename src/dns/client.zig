@@ -72,7 +72,7 @@ fn queryDNS(
 /// Sends a query to mDNS.
 /// Returns a iterator to read the replies.
 /// Must deinit the returned iterator.
-fn queryMDNS(
+pub fn queryMDNS(
     name: []const u8,
     resource_type: data.ResourceType,
     options: QueryOptions,
@@ -98,7 +98,7 @@ fn queryMDNS(
 }
 
 /// Send the message query and return the message ID.
-fn sendQuery(sockets: []?net.Socket, name: []const u8, resource_type: data.ResourceType) !u16 {
+pub fn sendQuery(sockets: []?net.Socket, name: []const u8, resource_type: data.ResourceType) !u16 {
     // Creates a new mesage ID
     const message_id = data.mkid();
 

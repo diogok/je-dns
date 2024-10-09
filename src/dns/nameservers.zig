@@ -266,23 +266,23 @@ const IP_ADAPTER_ADDRESSES = extern struct {
     FirstDnsSuffix: ?*IP_ADAPTER_DNS_SUFFIX,
 };
 
-pub const IP_ADDRESS = extern struct {
+const IP_ADDRESS = extern struct {
     Anonymous: u64,
     Next: ?*IP_ADDRESS,
     Address: SOCKET_ADDRESS,
 };
 
-pub const SOCKET_ADDRESS = extern struct {
+const SOCKET_ADDRESS = extern struct {
     lpSockaddr: ?*SOCKADDR,
     iSockaddrLength: i32,
 };
 
-pub const SOCKADDR = extern struct {
+const SOCKADDR = extern struct {
     sa_family: u16,
     sa_data: [14]u8,
 };
 
-pub const IP_ADAPTER_DNS_SUFFIX = extern struct {
+const IP_ADAPTER_DNS_SUFFIX = extern struct {
     Next: ?*IP_ADAPTER_DNS_SUFFIX,
     String: [256]u16,
 };
