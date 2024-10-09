@@ -45,9 +45,17 @@ fn queryDNS(
     defer iter.deinit();
 
     var i: usize = 0;
-    while (try iter.next()) |address| {
+    addresses: while (try iter.next()) |address| {
         if (i >= sockets.len) {
             break;
+        }
+        // avoid repeated dns servers
+        for (sockets[0..i]) |existing| {
+            if (existing) |sock| {
+                if (sock.address.eql(address)) {
+                    continue :addresses;
+                }
+            }
         }
         sockets[i] = try net.Socket.init(address, options.socket_options);
         i += 1;
