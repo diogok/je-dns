@@ -18,7 +18,7 @@ pub const QueryOptions = struct {
 
 /// Sends a query to regular DNS or mDNS.
 /// Returns a iterator to read the replies.
-/// Most deinit the returned iterator.
+/// Must deinit the returned iterator.
 pub fn query(
     name: []const u8,
     resource_type: data.ResourceType,
@@ -33,20 +33,24 @@ pub fn query(
 
 /// Sends a query to regular DNS.
 /// Returns a iterator to read the replies.
-/// Most deinit the returned iterator.
+/// Must deinit the returned iterator.
 fn queryDNS(
     name: []const u8,
     resource_type: data.ResourceType,
     options: QueryOptions,
 ) !ReplyIterator {
-    const addresses = try nameservers.getNameservers();
-
     var sockets: [num_sockets]?net.Socket = std.mem.zeroes([num_sockets]?net.Socket);
 
-    for (addresses, 0..@min(num_sockets, addresses.len)) |address, i| {
-        if (address) |addr| {
-            sockets[i] = try net.Socket.init(addr, options.socket_options);
+    var iter = try nameservers.getNameserverIterator();
+    defer iter.deinit();
+
+    var i: usize = 0;
+    while (try iter.next()) |address| {
+        if (i >= sockets.len) {
+            break;
         }
+        sockets[i] = try net.Socket.init(address, options.socket_options);
+        i += 1;
     }
 
     const message_id = try sendQuery(&sockets, name, resource_type);
@@ -59,7 +63,7 @@ fn queryDNS(
 
 /// Sends a query to mDNS.
 /// Returns a iterator to read the replies.
-/// Most deinit the returned iterator.
+/// Must deinit the returned iterator.
 fn queryMDNS(
     name: []const u8,
     resource_type: data.ResourceType,
@@ -137,6 +141,7 @@ pub const ReplyIterator = struct {
     buffer: [512]u8 = undefined,
 
     /// Reads the next response message.
+    /// Callee should deinit the returned message.
     pub fn next(self: *@This(), allocator: std.mem.Allocator) !?data.Message {
         // loop until we find a reply, try all sockets or have no more messages
         while (true) {
