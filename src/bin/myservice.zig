@@ -1,6 +1,5 @@
 const std = @import("std");
 const dns = @import("dns");
-const dnslog = @import("dnslog.zig");
 
 const log = std.log.scoped(.discover_with_me);
 
@@ -9,22 +8,19 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() != .leak);
     const allocator = gpa.allocator();
 
-    const records = [_]dns.Record{
-        dns.Record{
-            .name = "_hello._tcp.local",
-            .resource_type = .PTR,
-            .resource_class = .IN,
-            .ttl = 6000,
-            .data = dns.RecordData{
-                .ptr = "mememe._hello._tcp.local",
-            },
-        },
-    };
+    var mdns = try dns.mDNSService.init("_hello._tcp.local", 8888);
+    defer mdns.deinit();
 
-    var mDNSServer = try dns.mDNSServer.init(allocator, &records, .{});
-    defer mDNSServer.deinit();
+    try mdns.query();
+
+    var peer_list = dns.Peers{};
 
     while (true) {
-        try mDNSServer.handle();
+        if (try mdns.handle(allocator)) |peer| {
+            peer_list.found(peer);
+        }
+        for (peer_list.peers()) |peer| {
+            log.info("Peer: {any}", .{peer});
+        }
     }
 }

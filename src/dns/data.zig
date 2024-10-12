@@ -355,7 +355,7 @@ pub const RecordData = union(enum) {
                     errdefer allocator.free(txt);
 
                     _ = try reader.read(txt);
-                    total += len + 1;
+                    total += txt_len + 1;
 
                     try txts.append(txt);
                 }
@@ -374,17 +374,43 @@ pub const RecordData = union(enum) {
     pub fn writeTo(self: @This(), stream: anytype) !void {
         var writer = stream.writer();
         switch (self) {
-            .ip => {
-                try writer.writeInt(u16, 0, .big);
+            .ip => |address| {
+                switch (address.any.family) {
+                    std.posix.AF.INET => {
+                        try writer.writeInt(u16, 4, .big);
+                        try writer.writeInt(u32, std.mem.nativeToBig(u32, address.in.sa.addr), .big);
+                    },
+                    std.posix.AF.INET6 => {
+                        try writer.writeInt(u16, 16, .big);
+                        for (address.in6.sa.addr) |byte| {
+                            try writer.writeInt(u8, byte, .big);
+                        }
+                    },
+                    else => {
+                        unreachable;
+                    },
+                }
             },
-            .srv => {
-                try writer.writeInt(u16, 0, .big);
+            .srv => |srv| {
+                try writer.writeInt(u16, @truncate(srv.target.len + 2 + 6), .big);
+                try writer.writeInt(u16, srv.weight, .big);
+                try writer.writeInt(u16, srv.priority, .big);
+                try writer.writeInt(u16, srv.port, .big);
+                try writeName(writer, srv.target);
             },
-            .txt => {
-                try writer.writeInt(u16, 0, .big);
+            .txt => |txt| {
+                var size: u8 = @truncate(txt.len);
+                for (txt) |t| {
+                    size += @truncate(t.len);
+                }
+                try writer.writeInt(u8, size, .big);
+                for (txt) |t| {
+                    try writer.writeInt(u8, @truncate(t.len), .big);
+                    _ = try writer.write(t);
+                }
             },
             .ptr => |ptr| {
-                try writer.writeInt(u16, @truncate(ptr.len), .big);
+                try writer.writeInt(u16, @truncate(ptr.len + 2), .big);
                 try writeName(writer, ptr);
             },
             .raw => |bytes| {
@@ -416,6 +442,103 @@ pub const RecordData = union(enum) {
         }
     }
 };
+
+test "write an ipv4" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    const data = RecordData{
+        .ip = std.net.Address.initIp4(
+            [4]u8{ 127, 0, 0, 1 },
+            0,
+        ),
+    };
+
+    try data.writeTo(&stream);
+
+    const written = stream.getWritten();
+    const expected = [_]u8{
+        0, 4, // length of data
+        127, 0, 0, 1, // ip
+    };
+    try testing.expectEqualSlices(u8, expected[0..], written[0..]);
+}
+
+test "write an ipv6" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    const data = RecordData{
+        .ip = try std.net.Address.parseIp6(
+            "ff::01",
+            0,
+        ),
+    };
+
+    try data.writeTo(&stream);
+
+    const written = stream.getWritten();
+    const expected = [_]u8{
+        0, 16, // length of data
+        0, 0xff,
+        0, 0,
+        0, 0,
+        0, 0,
+        0, 0,
+        0, 0,
+        0, 0,
+        0, 1, // ip
+    };
+    try testing.expectEqualSlices(u8, expected[0..], written[0..]);
+}
+
+test "write an ptr" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    const data = RecordData{ .ptr = "abcdef" };
+
+    try data.writeTo(&stream);
+
+    const written = stream.getWritten();
+    const expected = [_]u8{
+        0, 8, // length of data (6 letters + name overhead)
+        6, // name len
+        97, 98, 99, 100, 101, 102, // ptr
+        0,
+    };
+    try testing.expectEqualSlices(u8, expected[0..], written[0..]);
+}
+
+test "write an srv" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    const data = RecordData{
+        .srv = .{
+            .weight = 8,
+            .priority = 1,
+            .port = 80,
+            .target = "hostname.local",
+        },
+    };
+
+    try data.writeTo(&stream);
+
+    const written = stream.getWritten();
+    const expected = [_]u8{
+        0, 22, // length of data (6 letters + name overhead)
+        0, 8, // weigth
+        0, 1, // priority
+        0, 80, // port
+        8, // label size
+        'h', 'o', 's', 't', 'n', 'a', 'm', 'e', // label
+        5, // label size
+        'l', 'o', 'c', 'a', 'l', // label
+        0, // end of name
+    };
+    try testing.expectEqualSlices(u8, expected[0..], written[0..]);
+}
 
 /// Read a name from a DNS message.
 /// DNS names has a format that require havin access to the whole message.
@@ -589,15 +712,27 @@ test "Write a message" {
 
     var message = Message{};
     message.header.ID = 38749;
+    message.header.flags.recursion_available = true;
+    message.header.flags.recursion_desired = true;
+    message.header.number_of_questions = 1;
+    message.header.number_of_additional_resource_records = 1;
     message.questions = &[_]Question{
         .{
             .name = "example.com",
             .resource_type = .A,
         },
     };
-    message.header.flags.recursion_available = true;
-    message.header.flags.recursion_desired = true;
-    message.header.number_of_questions = 1;
+    message.additional_records = &[_]Record{
+        .{
+            .name = "example.com",
+            .resource_type = .A,
+            .resource_class = .IN,
+            .ttl = 16777472,
+            .data = RecordData{
+                .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
+            },
+        },
+    };
 
     try message.writeTo(&stream);
 
@@ -606,10 +741,16 @@ test "Write a message" {
         0b10010111, 0b1011101, // ID
         1, 128, // flags: u16  = 110000000
         0, 1, //  number of questions :u16 = 1
-        0, 0, 0, 0, 0, 0, //  other "number of"
+        0, 0, 0, 0, 0, 1, //  other "number of"
         7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
         3, 'c', 'o', 'm', 0, // last label of name
         0, 1, 0, 1, // question type = A, class = IN
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 1, 0, 1, // resource type = A, class = IN
+        1, 0, 1, 0, // ttl
+        0, 4, // length of data
+        127, 0, 0, 1, // ip
     };
     try testing.expectEqualSlices(u8, example_query[0..], written[0..]);
 }
