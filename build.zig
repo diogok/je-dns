@@ -18,7 +18,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .root_source_file = b.path(b.fmt("src/bin/{s}.zig", .{artifact})),
-            .link_libc = target.result.os.tag == .windows, // used to get default dns addresses
+            //.link_libc = target.result.os.tag == .windows, // used to get default dns addresses
+            .link_libc = true,
         });
         exe.root_module.addImport("dns", dns);
 
@@ -34,7 +35,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .root_source_file = b.path("src/dns/root.zig"),
-            .link_libc = target.result.os.tag == .windows,
+            .link_libc = true,
         });
 
         const run_tests = b.addRunArtifact(tests);
@@ -48,6 +49,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .Debug,
             .root_source_file = b.path("src/dns/root.zig"),
+            .link_libc = true,
         });
 
         const install_docs = b.addInstallDirectory(.{
