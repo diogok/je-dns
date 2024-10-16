@@ -16,6 +16,8 @@ const Peer = struct {
     }
 };
 
+const HOST_NAME_MAX: usize = 64;
+
 pub const mDNSService = struct {
     sockets: [2]net.Socket,
 
@@ -24,7 +26,6 @@ pub const mDNSService = struct {
 
     pub fn init(name: []const u8, port: u16) !@This() {
         const ipv4 = try net.Socket.init(data.mdns_ipv4_address, .{});
-        //const ipv4 = try net.Socket.init(try std.net.Address.parseIp("127.0.0.1", 8979), .{});
         try ipv4.bind();
         try ipv4.multicast();
 
@@ -83,7 +84,7 @@ pub const mDNSService = struct {
     pub fn handle(self: *@This(), allocator: std.mem.Allocator) !?Peer {
         var buffer: [512]u8 = undefined;
         sockets: for (self.sockets) |socket| {
-            while (true) {
+            receiving: while (true) {
                 const len = socket.receive(&buffer) catch continue :sockets;
 
                 var stream = std.io.fixedBufferStream(buffer[0..len]);
@@ -91,7 +92,7 @@ pub const mDNSService = struct {
                 // parse the message
                 // if it fails it is probably invalid message
                 // so continue to try next message
-                const message = try data.Message.read(allocator, &stream); //catch continue :receiving;
+                const message = data.Message.read(allocator, &stream) catch continue :receiving;
                 defer message.deinit();
 
                 // handle the message
@@ -132,9 +133,6 @@ pub const mDNSService = struct {
             if (std.mem.eql(u8, record.name, self.name) and record.resource_type == .PTR) {
                 name = record.data.ptr;
             }
-        }
-
-        for (message.additional_records) |record| {
             if (std.mem.eql(u8, name, record.name) and record.resource_type == .SRV) {
                 port = record.data.srv.port;
                 host = record.data.srv.target;
@@ -155,11 +153,12 @@ pub const mDNSService = struct {
     }
 
     fn respond(self: *@This()) !void {
-        var hostname_buffer: [std.posix.HOST_NAME_MAX]u8 = undefined;
-        var name_buffer: [std.posix.HOST_NAME_MAX + 1024]u8 = undefined;
-        var target_buffer: [std.posix.HOST_NAME_MAX + 6]u8 = undefined;
+        var hostname_buffer: [HOST_NAME_MAX]u8 = undefined;
+        var name_buffer: [HOST_NAME_MAX + 1024]u8 = undefined;
+        var target_buffer: [HOST_NAME_MAX + 6]u8 = undefined;
 
-        const hostname = std.posix.gethostname(&hostname_buffer) catch unreachable;
+        const hostname_len = std.c.gethostname(&hostname_buffer, HOST_NAME_MAX);
+        const hostname = hostname_buffer[0..@intCast(hostname_len)];
 
         const full_service_name = std.fmt.bufPrint(
             &name_buffer,
@@ -197,8 +196,6 @@ pub const mDNSService = struct {
                         .ptr = full_service_name,
                     },
                 },
-            },
-            .additional_records = &[_]data.Record{
                 .{
                     .name = full_service_name,
                     .resource_class = .IN,

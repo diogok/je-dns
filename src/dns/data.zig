@@ -11,15 +11,11 @@ pub const Message = struct {
     header: Header = Header{},
     questions: []const Question = &[_]Question{},
     records: []const Record = &[_]Record{},
-    authority_records: []const Record = &[_]Record{},
-    additional_records: []const Record = &[_]Record{},
 
     /// Read message from a Stream.
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
         var questions = std.ArrayList(Question).init(allocator);
         var records = std.ArrayList(Record).init(allocator);
-        var authority_records = std.ArrayList(Record).init(allocator);
-        var additional_records = std.ArrayList(Record).init(allocator);
 
         errdefer {
             for (questions.items) |q| {
@@ -30,14 +26,6 @@ pub const Message = struct {
                 r.deinit(allocator);
             }
             records.deinit();
-            for (authority_records.items) |r| {
-                r.deinit(allocator);
-            }
-            authority_records.deinit();
-            for (additional_records.items) |r| {
-                r.deinit(allocator);
-            }
-            additional_records.deinit();
         }
 
         const header = try Header.read(stream);
@@ -48,22 +36,11 @@ pub const Message = struct {
             try questions.append(question);
         }
 
+        const total_records = header.number_of_answers + header.number_of_additional_resource_records + header.number_of_authority_resource_records;
         i = 0;
-        while (i < header.number_of_answers) : (i += 1) {
+        while (i < total_records) : (i += 1) {
             const record = try Record.read(allocator, stream);
             try records.append(record);
-        }
-
-        i = 0;
-        while (i < header.number_of_authority_resource_records) : (i += 1) {
-            const record = try Record.read(allocator, stream);
-            try authority_records.append(record);
-        }
-
-        i = 0;
-        while (i < header.number_of_additional_resource_records) : (i += 1) {
-            const record = try Record.read(allocator, stream);
-            try additional_records.append(record);
         }
 
         return @This(){
@@ -71,8 +48,6 @@ pub const Message = struct {
             .header = header,
             .questions = try questions.toOwnedSlice(),
             .records = try records.toOwnedSlice(),
-            .authority_records = try authority_records.toOwnedSlice(),
-            .additional_records = try additional_records.toOwnedSlice(),
         };
     }
 
@@ -83,12 +58,6 @@ pub const Message = struct {
             try question.writeTo(stream);
         }
         for (self.records) |record| {
-            try record.writeTo(stream);
-        }
-        for (self.authority_records) |record| {
-            try record.writeTo(stream);
-        }
-        for (self.additional_records) |record| {
             try record.writeTo(stream);
         }
     }
@@ -105,16 +74,6 @@ pub const Message = struct {
                 r.deinit(allocator);
             }
             allocator.free(self.records);
-
-            for (self.authority_records) |r| {
-                r.deinit(allocator);
-            }
-            allocator.free(self.authority_records);
-
-            for (self.additional_records) |r| {
-                r.deinit(allocator);
-            }
-            allocator.free(self.additional_records);
         }
     }
 };
@@ -149,6 +108,7 @@ pub const Header = packed struct {
             .number_of_authority_resource_records = try reader.readInt(u16, .big),
             .number_of_additional_resource_records = try reader.readInt(u16, .big),
         };
+        //return try reader.readStructEndian(@This(), .big);
     }
 
     /// Write headers to a stream.
@@ -164,6 +124,29 @@ pub const Header = packed struct {
         try writer.writeInt(u16, self.number_of_additional_resource_records, .big);
     }
 };
+
+test "read header" {
+    const bytes = [_]u8{
+        1, 0, // ID
+        0b10100001, 0b10000000, // flags
+        0, 1, //  number of questions  = 1
+        0, 2, // number of answers = 2
+        0, 1, // number of authority answers = 1
+        0, 1, // number of additional records = 1
+    };
+
+    var stream = std.io.fixedBufferStream(bytes[0..]);
+
+    const header = try Header.read(&stream);
+
+    try testing.expectEqual(header.ID, 256);
+    try testing.expectEqual(header.flags.query_or_reply, .reply);
+    try testing.expectEqual(header.flags.recursion_desired, true);
+    try testing.expectEqual(header.flags.recursion_available, true);
+    try testing.expectEqual(header.flags.response_code, .no_error);
+    try testing.expectEqual(header.number_of_questions, 1);
+    try testing.expectEqual(header.number_of_answers, 2);
+}
 
 /// Flags for a DNS message, for query and answer.
 pub const Flags = packed struct {
@@ -196,7 +179,23 @@ pub const Flags = packed struct {
     }
 };
 
-/// Question for a resource type. Also returned on Answers.
+test "read flags" {
+    const bytes = [_]u8{
+        0b10100001, 0b10000000, // flags
+    };
+
+    var stream = std.io.fixedBufferStream(bytes[0..]);
+    var reader = stream.reader();
+
+    const flags = try Flags.read(&reader);
+
+    try testing.expectEqual(flags.query_or_reply, .reply);
+    try testing.expectEqual(flags.recursion_desired, true);
+    try testing.expectEqual(flags.recursion_available, true);
+    try testing.expectEqual(flags.response_code, .no_error);
+}
+
+/// Question for a resource type. Sometimes also returned on Answers.
 pub const Question = struct {
     /// Name is usually the domain, but also any query object.
     name: []const u8,
@@ -238,9 +237,9 @@ pub const Question = struct {
 pub const Record = struct {
     name: []const u8,
     resource_type: ResourceType,
-    resource_class: ResourceClass,
+    resource_class: ResourceClass = .IN,
     /// Expiration in econds
-    ttl: u32,
+    ttl: u32 = 0,
     data: RecordData,
 
     /// Read resource from stream.
@@ -715,14 +714,14 @@ test "Write a message" {
     message.header.flags.recursion_available = true;
     message.header.flags.recursion_desired = true;
     message.header.number_of_questions = 1;
-    message.header.number_of_additional_resource_records = 1;
+    message.header.number_of_additional_resource_records = 2;
     message.questions = &[_]Question{
         .{
             .name = "example.com",
             .resource_type = .A,
         },
     };
-    message.additional_records = &[_]Record{
+    message.records = &[_]Record{
         .{
             .name = "example.com",
             .resource_type = .A,
@@ -730,6 +729,15 @@ test "Write a message" {
             .ttl = 16777472,
             .data = RecordData{
                 .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
+            },
+        },
+        .{
+            .name = "example.com",
+            .resource_type = .AAAA,
+            .resource_class = .IN,
+            .ttl = 16777472,
+            .data = RecordData{
+                .ip = std.net.Address.initIp6([16]u8{ 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0),
             },
         },
     };
@@ -741,7 +749,7 @@ test "Write a message" {
         0b10010111, 0b1011101, // ID
         1, 128, // flags: u16  = 110000000
         0, 1, //  number of questions :u16 = 1
-        0, 0, 0, 0, 0, 1, //  other "number of"
+        0, 0, 0, 0, 0, 2, //  other "number of"
         7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
         3, 'c', 'o', 'm', 0, // last label of name
         0, 1, 0, 1, // question type = A, class = IN
@@ -751,6 +759,15 @@ test "Write a message" {
         1, 0, 1, 0, // ttl
         0, 4, // length of data
         127, 0, 0, 1, // ip
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', // first label of name
+        3, 'c', 'o', 'm', 0, // last label of name
+        0, 28, 0, 1, // resource type = AAAA, class = IN
+        1, 0, 1, 0, // ttl
+        0, 16, // length of data
+        0xff, 0, 0, 0, // ip
+        0, 0, 0, 0, // ip
+        0, 0, 0, 0, // ip
+        0, 0, 0, 1, // ip
     };
     try testing.expectEqualSlices(u8, example_query[0..], written[0..]);
 }
@@ -813,9 +830,7 @@ test "Read a message" {
     try testing.expectEqual(reply.header.number_of_questions, 1);
     try testing.expectEqual(reply.header.number_of_answers, 2);
     try testing.expectEqual(reply.questions.len, 1);
-    try testing.expectEqual(reply.records.len, 2);
-    try testing.expectEqual(reply.authority_records.len, 1);
-    try testing.expectEqual(reply.additional_records.len, 1);
+    try testing.expectEqual(reply.records.len, 4);
 
     try testing.expectEqualStrings(reply.questions[0].name, "example.com");
     try testing.expectEqual(reply.questions[0].resource_type, ResourceType.A);
@@ -833,8 +848,73 @@ test "Read a message" {
     const ip4321 = try std.net.Address.parseIp("4.3.2.1", 0);
     try testing.expect(reply.records[1].data.ip.eql(ip4321));
 
-    try testing.expectEqualStrings(reply.authority_records[0].name, "ww2.example.com");
-    try testing.expectEqualStrings(reply.additional_records[0].name, "ww1.example.com");
+    try testing.expectEqualStrings(reply.records[2].name, "ww2.example.com");
+    try testing.expectEqualStrings(reply.records[3].name, "ww1.example.com");
+}
+
+test "Write and read the same message" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    var message = Message{};
+    message.header.ID = 38749;
+    message.header.flags.recursion_available = true;
+    message.header.flags.recursion_desired = true;
+    message.header.number_of_questions = 1;
+    message.header.number_of_additional_resource_records = 2;
+    message.questions = &[_]Question{
+        .{
+            .name = "example.com",
+            .resource_type = .A,
+        },
+    };
+    message.records = &[_]Record{
+        .{
+            .name = "example.com",
+            .resource_type = .A,
+            .resource_class = .IN,
+            .ttl = 16777472,
+            .data = RecordData{
+                .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
+            },
+        },
+        .{
+            .name = "example.com",
+            .resource_type = .AAAA,
+            .resource_class = .IN,
+            .ttl = 16777472,
+            .data = RecordData{
+                .ip = std.net.Address.initIp6([16]u8{ 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0),
+            },
+        },
+    };
+
+    try message.writeTo(&stream);
+    const written = stream.getWritten();
+
+    var stream2 = std.io.fixedBufferStream(written);
+    var message2 = try Message.read(testing.allocator, &stream2);
+    defer message2.deinit();
+
+    try testing.expectEqual(message.header, message2.header);
+    try testing.expectEqual(message.questions.len, message2.questions.len);
+    try testing.expectEqual(message.records.len, message2.records.len);
+
+    try testing.expectEqualStrings(message.questions[0].name, message2.questions[0].name);
+    try testing.expectEqual(message.questions[0].resource_class, message2.questions[0].resource_class);
+    try testing.expectEqual(message.questions[0].resource_type, message2.questions[0].resource_type);
+
+    try testing.expectEqualStrings(message.records[0].name, message2.records[0].name);
+    try testing.expectEqual(message.records[0].ttl, message2.records[0].ttl);
+    try testing.expectEqual(message.records[0].resource_class, message2.records[0].resource_class);
+    try testing.expectEqual(message.records[0].resource_type, message2.records[0].resource_type);
+    try testing.expect(message.records[0].data.ip.eql(message2.records[0].data.ip));
+
+    try testing.expectEqualStrings(message.records[1].name, message2.records[1].name);
+    try testing.expectEqual(message.records[1].ttl, message2.records[1].ttl);
+    try testing.expectEqual(message.records[1].resource_class, message2.records[1].resource_class);
+    try testing.expectEqual(message.records[1].resource_type, message2.records[1].resource_type);
+    try testing.expect(message.records[1].data.ip.eql(message2.records[1].data.ip));
 }
 
 /// Check if this is a .local address.
