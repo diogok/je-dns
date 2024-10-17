@@ -337,12 +337,14 @@ pub const RecordData = union(enum) {
                 };
             },
             .TXT => {
-                var txts = std.ArrayList([]const u8).init(allocator);
+                var txts_buffer: [16][]const u8 = undefined;
+                var txts_len: usize = 0;
+
                 errdefer {
-                    for (txts.items) |text| {
-                        allocator.free(text);
+                    var i: usize = 0;
+                    while (i < txts_len) : (i += 1) {
+                        allocator.free(txts_buffer[i]);
                     }
-                    txts.deinit();
                 }
 
                 // TODO: split?
@@ -355,10 +357,12 @@ pub const RecordData = union(enum) {
                     _ = try reader.read(txt);
                     total += txt_len + 1;
 
-                    try txts.append(txt);
+                    txts_buffer[txts_len] = txt;
+                    txts_len += 1;
                 }
 
-                return .{ .txt = try txts.toOwnedSlice() };
+                const txts = try allocator.dupe([]const u8, txts_buffer[0..txts_len]);
+                return .{ .txt = txts };
             },
             else => {
                 const bytes = try allocator.alloc(u8, len);
@@ -397,11 +401,11 @@ pub const RecordData = union(enum) {
                 try writeName(writer, srv.target);
             },
             .txt => |txt| {
-                var size: u8 = @truncate(txt.len);
+                var size: u16 = @truncate(txt.len);
                 for (txt) |t| {
                     size += @truncate(t.len);
                 }
-                try writer.writeInt(u8, size, .big);
+                try writer.writeInt(u16, size, .big);
                 for (txt) |t| {
                     try writer.writeInt(u8, @truncate(t.len), .big);
                     _ = try writer.write(t);
@@ -538,14 +542,56 @@ test "write an srv" {
     try testing.expectEqualSlices(u8, expected[0..], written[0..]);
 }
 
+test "write txt" {
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    const data = RecordData{
+        .txt = &[_][]const u8{
+            "hello=world",
+            "foo=bar",
+        },
+    };
+
+    try data.writeTo(&stream);
+
+    const written = stream.getWritten();
+    const expected = [_]u8{
+        0, 20, // len of data
+        11, // size of an entry
+        'h', 'e', 'l', 'l', 'o', '=', 'w', 'o', 'r', 'l', 'd', // a label
+        7, // size of an entry
+        'f', 'o', 'o', '=', 'b', 'a', 'r', // another label
+    };
+    try testing.expectEqualSlices(u8, expected[0..], written[0..]);
+}
+
+test "read txt" {
+    const data = [_]u8{
+        0, 20, // len of data
+        11, // size of an entry
+        'h', 'e', 'l', 'l', 'o', '=', 'w', 'o', 'r', 'l', 'd', // a label
+        7, // size of an entry
+        'f', 'o', 'o', '=', 'b', 'a', 'r', // another label
+    };
+    var stream = std.io.fixedBufferStream(&data);
+
+    const record = try RecordData.read(testing.allocator, .TXT, &stream);
+    defer record.deinit(testing.allocator);
+
+    try testing.expectEqual(2, record.txt.len);
+    try testing.expectEqualStrings("hello=world", record.txt[0]);
+    try testing.expectEqualStrings("foo=bar", record.txt[1]);
+}
+
 /// Read a name from a DNS message.
 /// DNS names has a format that require havin access to the whole message.
 /// Each section (.) is prefixed with the length of that section.
 /// The end is byte '0'.
 /// A section maybe a pointer to another section elsewhere.
 fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
-    var name_buffer = std.ArrayList(u8).init(allocator);
-    defer name_buffer.deinit();
+    var name_buffer: [253]u8 = undefined;
+    var name_len: usize = 0;
 
     var seekBackTo: u64 = 0;
 
@@ -566,10 +612,13 @@ fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
             try stream.seekTo(ptr);
         } else {
             // If we already have a section, append a "."
-            if (name_buffer.items.len > 0) try name_buffer.append('.');
+            if (name_len > 0) {
+                name_buffer[name_len] = '.';
+                name_len += 1;
+            }
             // read the sepecificed len
-            const label = try name_buffer.addManyAsSlice(len);
-            _ = try reader.read(label);
+            const increase = try reader.read(name_buffer[name_len .. name_len + len]);
+            name_len += increase;
         }
     }
 
@@ -577,7 +626,7 @@ fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
         try stream.seekTo(seekBackTo);
     }
 
-    return try name_buffer.toOwnedSlice();
+    return try allocator.dupe(u8, name_buffer[0..name_len]);
 }
 
 /// Writes a name in the format of DNS names.
