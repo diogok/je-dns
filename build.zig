@@ -18,7 +18,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .root_source_file = b.path(b.fmt("src/bin/{s}.zig", .{artifact})),
-            //.link_libc = target.result.os.tag == .windows, // used to get default dns addresses
             .link_libc = true,
         });
         exe.root_module.addImport("dns", dns);

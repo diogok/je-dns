@@ -14,40 +14,40 @@ pub const Message = struct {
 
     /// Read message from a Stream.
     pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
-        var questions = std.ArrayList(Question).init(allocator);
-        var records = std.ArrayList(Record).init(allocator);
-
-        errdefer {
-            for (questions.items) |q| {
-                q.deinit(allocator);
-            }
-            questions.deinit();
-            for (records.items) |r| {
-                r.deinit(allocator);
-            }
-            records.deinit();
-        }
-
         const header = try Header.read(stream);
 
-        var i: usize = 0;
-        while (i < header.number_of_questions) : (i += 1) {
-            const question = try Question.read(allocator, stream);
-            try questions.append(question);
+        var q: usize = 0;
+        var questions = try allocator.alloc(Question, header.number_of_questions);
+        errdefer {
+            var i: usize = 0;
+            while (i < q) : (i += 1) {
+                questions[i].deinit(allocator);
+            }
+            allocator.free(questions);
+        }
+        while (q < questions.len) : (q += 1) {
+            questions[q] = try Question.read(allocator, stream);
         }
 
         const total_records = header.number_of_answers + header.number_of_additional_resource_records + header.number_of_authority_resource_records;
-        i = 0;
-        while (i < total_records) : (i += 1) {
-            const record = try Record.read(allocator, stream);
-            try records.append(record);
+        var r: usize = 0;
+        var records = try allocator.alloc(Record, total_records);
+        errdefer {
+            var i: usize = 0;
+            while (i < r) : (i += 1) {
+                records[i].deinit(allocator);
+            }
+            allocator.free(records);
+        }
+        while (r < records.len) : (r += 1) {
+            records[r] = try Record.read(allocator, stream);
         }
 
         return @This(){
             .allocator = allocator,
             .header = header,
-            .questions = try questions.toOwnedSlice(),
-            .records = try records.toOwnedSlice(),
+            .questions = questions,
+            .records = records,
         };
     }
 
@@ -108,7 +108,6 @@ pub const Header = packed struct {
             .number_of_authority_resource_records = try reader.readInt(u16, .big),
             .number_of_additional_resource_records = try reader.readInt(u16, .big),
         };
-        //return try reader.readStructEndian(@This(), .big);
     }
 
     /// Write headers to a stream.
@@ -308,7 +307,7 @@ pub const RecordData = union(enum) {
     pub fn read(allocator: std.mem.Allocator, resource_type: ResourceType, stream: anytype) !@This() {
         var reader = stream.reader();
 
-        // Makes we leave the stream at the end of the data.
+        // Make sure we leave the stream at the end of the data.
         const len = try reader.readInt(u16, .big);
         const pos = try stream.getPos();
         defer stream.seekTo(len + pos) catch unreachable;
