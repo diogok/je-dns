@@ -8,13 +8,39 @@ pub const NetworkInterfaceAddress = struct {
     name: []const u8,
     address: std.net.Address,
     up: bool,
+    family: enum { IPv4, IPv6 },
 };
 
+pub fn getNetworkInterfaceAddressess(allocator: std.mem.Allocator) ![]NetworkInterfaceAddress {
+    var iter = try NetworkInterfaceAddressIterator.init();
+    defer iter.deinit();
+    var count: usize = 0;
+    while (try iter.next()) |_| {
+        count += 1;
+    }
+    iter.reset();
+
+    var ifs = try allocator.alloc(NetworkInterfaceAddress, count);
+    var i: usize = 0;
+    while (try iter.next()) |if_addr| {
+        ifs[i] = if_addr;
+        i += 1;
+    }
+    return ifs;
+}
+
+test "get list of if address" {
+    const ifs = try getNetworkInterfaceAddressess(testing.allocator);
+    defer testing.allocator.free(ifs);
+    try testing.expect(ifs.len >= 1);
+}
+
+pub const NetworkInterfaceAddressIterator = if (builtin.os.tag == .windows) WindowsNetworkInterfaceAddressesIterator else PosixNetworkInterfaceAddressesIterator;
 // posix getifaddrs handling
 
 const sockaddr = std.c.sockaddr;
-const IPv4 = std.c.AF.INET;
-const IPv6 = std.c.AF.INET6;
+const IPv4 = if (builtin.os.tag == .windows) std.os.windows.ws2_32.AF.INET else std.c.AF.INET;
+const IPv6 = if (builtin.os.tag == .windows) std.os.windows.ws2_32.AF.INET6 else std.c.AF.INET6;
 const ifaddrs = extern struct {
     next: ?*ifaddrs,
     name: ?[*:0]u8,
@@ -64,15 +90,24 @@ const PosixNetworkInterfaceAddressesIterator = struct {
                 if (address.family == IPv4 or address.family == IPv6) {
                     const name: []const u8 = @ptrCast(std.mem.span(ifaddr.name));
                     const sockaddr1: *align(4) const sockaddr = @ptrCast(@alignCast(ifaddr.address));
-                    return NetworkInterfaceAddress{
+                    var netif = NetworkInterfaceAddress{
                         .address = std.net.Address.initPosix(sockaddr1),
                         .name = name,
                         .up = ifaddr.flags & 0b1 == 1,
+                        .family = .IPv6,
                     };
+                    if (address.family == IPv4) {
+                        netif.family = .IPv4;
+                    }
+                    return netif;
                 }
             }
         }
         return null;
+    }
+
+    pub fn reset(self: *@This()) void {
+        self.ifaddrs = self.ifap;
     }
 };
 
@@ -135,10 +170,14 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
     pub fn next(self: *@This()) !?NetworkInterfaceAddress {
         if (self.curr_address) |addr| {
             var address: ?std.net.Address = null;
+            var ipv6: bool = true;
             if (addr.Address.lpSockaddr) |sock_addr| {
                 // parse address
                 const sockaddr1: *align(4) const std.os.windows.ws2_32.sockaddr = @ptrCast(@alignCast(sock_addr));
                 address = std.net.Address.initPosix(sockaddr1);
+                if (sock_addr.sa_family == IPv4) {
+                    ipv6 = false;
+                }
             }
 
             var name: []const u8 = "";
@@ -146,11 +185,15 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
                 name = adapter_name[0..10];
             }
 
-            const netinf = NetworkInterfaceAddress{
+            var netinf = NetworkInterfaceAddress{
                 .address = address,
                 .name = name,
                 .up = self.curr_adapter.OperStatus == .Up,
+                .family = .IPv6,
             };
+            if (!ipv6) {
+                netinf.family = .IPv4;
+            }
 
             // check if there are more servers
             if (addr.Next) |next_address| {
@@ -169,6 +212,11 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
             return netinf;
         }
         return null;
+    }
+
+    pub fn reset(self: *@This()) void {
+        self.curr_adapter = self.src;
+        self.curr_address = &self.curr_adapter.FirstUnicastAddress.?.first_addr;
     }
 };
 

@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const data = @import("data.zig");
 const net = @import("socket.zig");
+const netif = @import("network_interface.zig");
 
 const Peer = struct {
     address: std.net.Address,
@@ -154,11 +155,11 @@ pub const mDNSService = struct {
 
     fn respond(self: *@This()) !void {
         var hostname_buffer: [HOST_NAME_MAX]u8 = undefined;
-        var name_buffer: [HOST_NAME_MAX + 1024]u8 = undefined;
         var target_buffer: [HOST_NAME_MAX + 6]u8 = undefined;
+        var name_buffer: [HOST_NAME_MAX + 1024]u8 = undefined;
 
-        const hostname_len = std.c.gethostname(&hostname_buffer, HOST_NAME_MAX);
-        const hostname = hostname_buffer[0..@intCast(hostname_len)];
+        _ = std.c.gethostname(&hostname_buffer, HOST_NAME_MAX);
+        const hostname = std.mem.span(@as([*c]u8, &hostname_buffer));
 
         const full_service_name = std.fmt.bufPrint(
             &name_buffer,
@@ -177,58 +178,67 @@ pub const mDNSService = struct {
             },
         ) catch unreachable;
 
-        const message = data.Message{
-            .allocator = null,
-            .header = data.Header{
-                .flags = data.Flags{
-                    .query_or_reply = .reply,
-                },
-                .number_of_answers = 1,
-                .number_of_additional_resource_records = 2,
-            },
-            .records = &[_]data.Record{
-                .{
-                    .name = self.name,
-                    .resource_class = .IN,
-                    .resource_type = .PTR,
-                    .ttl = 600,
-                    .data = .{
-                        .ptr = full_service_name,
-                    },
-                },
-                .{
-                    .name = full_service_name,
-                    .resource_class = .IN,
-                    .resource_type = .SRV,
-                    .ttl = 600,
-                    .data = .{
-                        .srv = .{
-                            .port = self.port,
-                            .priority = 0,
-                            .weight = 0,
-                            .target = target_host,
-                        },
-                    },
-                },
-                .{
-                    .name = target_host,
-                    .resource_class = .IN,
-                    .resource_type = .A,
-                    .ttl = 600,
-                    .data = .{
-                        .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
-                    },
-                },
-            },
-        };
+        var hosts_count: u8 = 0;
+        var netif_iter = try netif.NetworkInterfaceAddressIterator.init();
+        defer netif_iter.deinit();
+        while (try netif_iter.next()) |_| {
+            hosts_count += 1;
+        }
+        netif_iter.reset();
 
         // get message bytes
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
-        try message.writeTo(&stream);
-        const bytes = stream.getWritten();
+
+        const header = data.Header{
+            .flags = data.Flags{
+                .query_or_reply = .reply,
+            },
+            .number_of_answers = 1,
+            .number_of_additional_resource_records = 1 + hosts_count,
+        };
+        try header.writeTo(&stream);
+
+        var record = data.Record{
+            .name = self.name,
+            .resource_type = .PTR,
+            .data = .{
+                .ptr = full_service_name,
+            },
+        };
+        try record.writeTo(&stream);
+
+        record = data.Record{
+            .name = full_service_name,
+            .resource_type = .SRV,
+            .data = .{
+                .srv = .{
+                    .port = self.port,
+                    .priority = 0,
+                    .weight = 0,
+                    .target = target_host,
+                },
+            },
+        };
+        try record.writeTo(&stream);
+
+        while (try netif_iter.next()) |addr| {
+            var resource_type: data.ResourceType = .AAAA;
+            if (addr.family == .IPv4) {
+                resource_type = .A;
+            }
+            record = data.Record{
+                .name = target_host,
+                .resource_type = resource_type,
+                .data = .{
+                    .ip = addr.address,
+                },
+            };
+            try record.writeTo(&stream);
+        }
 
         // Sends the message to all sockets
+        const bytes = stream.getWritten();
         for (self.sockets) |socket| {
             try socket.sendBytes(bytes);
         }
