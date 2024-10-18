@@ -115,7 +115,14 @@ pub const Socket = struct {
     pub fn multicast(self: @This()) !void {
         try setupMulticast(self.handle, self.address, .{});
     }
+
+    /// Get the family (IPv4 or IPv6) of this socket.
+    pub fn getFamily(self: @This()) Family {
+        return getAddressFamily(self.address);
+    }
 };
+
+pub const Family = enum { IPv4, IPv6 };
 
 /// Detects if this is a multicast address.
 pub fn isMulticast(address: std.net.Address) bool {
@@ -184,6 +191,15 @@ pub const MulticastOptions = struct {
     /// Useful to debug.
     loop: bool = true,
 };
+
+/// Get the family (IPv4 or IPv6) of an address.
+pub fn getAddressFamily(address: std.net.Address) Family {
+    switch (address.any.family) {
+        std.posix.AF.INET => return .IPv4,
+        std.posix.AF.INET6 => return .IPv6,
+        else => unreachable,
+    }
+}
 
 /// Setup multicast options, specially for using mDNS.
 /// Works for IPv4 and IPv6.
@@ -409,3 +425,6 @@ const IPV6_ADD_MEMBERSHIP = switch (builtin.os.tag) {
     .linux => 20,
     else => @compileError("UNSUPPORTED OS"),
 };
+
+pub const ipv4_localhost = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0);
+pub const ipv6_localhost = std.net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0);

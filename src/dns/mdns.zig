@@ -97,7 +97,7 @@ pub const mDNSService = struct {
                 defer message.deinit();
 
                 // handle the message
-                if (try self.handleMessage(message)) |peer| {
+                if (try self.handleMessage(message, socket.getFamily())) |peer| {
                     // if the message contained a peer, return it
                     return peer;
                     // else just continue to next message or socket
@@ -107,7 +107,7 @@ pub const mDNSService = struct {
         return null;
     }
 
-    fn handleMessage(self: *@This(), message: data.Message) !?Peer {
+    fn handleMessage(self: *@This(), message: data.Message, family: net.Family) !?Peer {
         switch (message.header.flags.query_or_reply) {
             .reply => {
                 return self.handleReply(message);
@@ -115,7 +115,7 @@ pub const mDNSService = struct {
             .query => {
                 for (message.questions) |q| {
                     if (std.mem.eql(u8, q.name, self.name)) {
-                        try self.respond();
+                        try self.respond(family);
                     }
                 }
                 return null;
@@ -142,6 +142,10 @@ pub const mDNSService = struct {
                 addr = record.data.ip;
                 ttl = record.ttl;
             }
+            if (std.mem.eql(u8, host, record.name) and record.resource_type == .AAAA) {
+                addr = record.data.ip;
+                ttl = record.ttl;
+            }
         }
 
         if (addr) |address| {
@@ -160,7 +164,7 @@ pub const mDNSService = struct {
         return null;
     }
 
-    fn respond(self: *@This()) !void {
+    fn respond(self: *@This(), family: net.Family) !void {
         var hostname_buffer: [HOST_NAME_MAX]u8 = undefined;
         var target_buffer: [HOST_NAME_MAX + 6]u8 = undefined;
         var name_buffer: [HOST_NAME_MAX + 1024]u8 = undefined;
@@ -188,8 +192,18 @@ pub const mDNSService = struct {
         var hosts_count: u8 = 0;
         var netif_iter = netif.NetworkInterfaceAddressIterator.init();
         defer netif_iter.deinit();
-        while (netif_iter.next()) |_| {
-            hosts_count += 1;
+        while (netif_iter.next()) |a| {
+            if (a.address.eql(net.ipv4_localhost) or a.address.eql(net.ipv6_localhost)) {
+                continue;
+            }
+            if (!a.up) {
+                continue;
+            }
+            if (family == .IPv4 and a.family == .IPv4) {
+                hosts_count += 1;
+            } else if (family == .IPv6 and a.family == .IPv6) {
+                hosts_count += 1;
+            }
         }
         netif_iter.reset();
 
@@ -230,18 +244,31 @@ pub const mDNSService = struct {
         try record.writeTo(&stream);
 
         while (netif_iter.next()) |addr| {
-            var resource_type: data.ResourceType = .AAAA;
-            if (addr.family == .IPv4) {
-                resource_type = .A;
+            if (!addr.up) {
+                continue;
             }
-            record = data.Record{
-                .name = target_host,
-                .resource_type = resource_type,
-                .data = .{
-                    .ip = addr.address,
-                },
-            };
-            try record.writeTo(&stream);
+            if (addr.address.eql(net.ipv4_localhost) or addr.address.eql(net.ipv6_localhost)) {
+                continue;
+            }
+            if (family == .IPv4 and addr.family == .IPv4) {
+                record = data.Record{
+                    .name = target_host,
+                    .resource_type = .A,
+                    .data = .{
+                        .ip = addr.address,
+                    },
+                };
+                try record.writeTo(&stream);
+            } else if (family == .IPv6 and addr.family == .IPv6) {
+                record = data.Record{
+                    .name = target_host,
+                    .resource_type = .AAAA,
+                    .data = .{
+                        .ip = addr.address,
+                    },
+                };
+                try record.writeTo(&stream);
+            }
         }
 
         // Sends the message to all sockets
@@ -315,6 +342,9 @@ pub const Peers = struct {
             if (existing) |peer| {
                 const now = std.time.timestamp();
                 const them = self.timestamps[i];
+                if (peer.ttl_in_seconds == 0) {
+                    continue;
+                }
                 const expires_at = them + peer.ttl_in_seconds;
                 if (expires_at <= now) {
                     self.data[i] = null;
