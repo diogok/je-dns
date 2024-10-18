@@ -145,6 +145,13 @@ pub const mDNSService = struct {
         }
 
         if (addr) |address| {
+            var netif_iter = netif.NetworkInterfaceAddressIterator.init();
+            defer netif_iter.deinit();
+            while (netif_iter.next()) |my_addr| {
+                if (address.eql(my_addr.address)) {
+                    return null;
+                }
+            }
             return Peer{
                 .address = address,
                 .ttl_in_seconds = ttl,
@@ -179,9 +186,9 @@ pub const mDNSService = struct {
         ) catch unreachable;
 
         var hosts_count: u8 = 0;
-        var netif_iter = try netif.NetworkInterfaceAddressIterator.init();
+        var netif_iter = netif.NetworkInterfaceAddressIterator.init();
         defer netif_iter.deinit();
-        while (try netif_iter.next()) |_| {
+        while (netif_iter.next()) |_| {
             hosts_count += 1;
         }
         netif_iter.reset();
@@ -222,7 +229,7 @@ pub const mDNSService = struct {
         };
         try record.writeTo(&stream);
 
-        while (try netif_iter.next()) |addr| {
+        while (netif_iter.next()) |addr| {
             var resource_type: data.ResourceType = .AAAA;
             if (addr.family == .IPv4) {
                 resource_type = .A;

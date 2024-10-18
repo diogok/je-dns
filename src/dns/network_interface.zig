@@ -6,23 +6,23 @@ const testing = std.testing;
 
 pub const NetworkInterfaceAddress = struct {
     name: []const u8,
+    family: enum { IPv4, IPv6 },
     address: std.net.Address,
     up: bool,
-    family: enum { IPv4, IPv6 },
 };
 
 pub fn getNetworkInterfaceAddressess(allocator: std.mem.Allocator) ![]NetworkInterfaceAddress {
-    var iter = try NetworkInterfaceAddressIterator.init();
+    var iter = NetworkInterfaceAddressIterator.init();
     defer iter.deinit();
     var count: usize = 0;
-    while (try iter.next()) |_| {
+    while (iter.next()) |_| {
         count += 1;
     }
     iter.reset();
 
     var ifs = try allocator.alloc(NetworkInterfaceAddress, count);
     var i: usize = 0;
-    while (try iter.next()) |if_addr| {
+    while (iter.next()) |if_addr| {
         ifs[i] = if_addr;
         i += 1;
     }
@@ -60,17 +60,13 @@ const PosixNetworkInterfaceAddressesIterator = struct {
     ifap: *ifaddrs,
     ifaddrs: ?*ifaddrs,
 
-    pub fn init() !@This() {
+    pub fn init() @This() {
         var ifap: ifaddrs = std.mem.zeroes(ifaddrs);
         var self = @This(){
             .ifap = &ifap,
             .ifaddrs = null,
         };
-        const r = getifaddrs(&self.ifap);
-        if (r != 0) {
-            std.debug.print("Error on getifaddrs: {d}\n", .{r});
-            return error.getifaddrs;
-        }
+        _ = getifaddrs(&self.ifap);
         self.ifaddrs = self.ifap;
         return self;
     }
@@ -79,7 +75,7 @@ const PosixNetworkInterfaceAddressesIterator = struct {
         freeifaddrs(self.ifap);
     }
 
-    pub fn next(self: *@This()) !?NetworkInterfaceAddress {
+    pub fn next(self: *@This()) ?NetworkInterfaceAddress {
         while (self.ifaddrs) |ifaddr| {
             if (ifaddr.next) |_| {
                 self.ifaddrs = ifaddr.next;
@@ -132,7 +128,7 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
     curr_adapter: *IP_ADAPTER_ADDRESSES,
     curr_address: ?*IP_ADDRESS,
 
-    pub fn init() !@This() {
+    pub fn init() @This() {
         // prepare an empty struct to receive the data
         // let windows figure out the size needed
         var buf_len: u32 = 0;
@@ -142,22 +138,13 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
         const adapter: *IP_ADAPTER_ADDRESSES = @ptrCast(@alignCast(buffer.?));
 
         // fill the struct
-        const ret = GetAdaptersAddresses(0, 0, null, adapter, &buf_len);
+        _ = GetAdaptersAddresses(0, 0, null, adapter, &buf_len);
 
-        if (ret != 0) {
-            std.debug.print("GetAdaptersAddresses error {d}\n", .{ret});
-            return error.GetAdaptersAddressesError;
-        }
-
-        if (adapter.FirstUnicastAddress) |first_addr| {
-            return @This(){
-                .src = adapter,
-                .curr_adapter = adapter,
-                .curr_address = &first_addr.IpAddress,
-            };
-        } else {
-            return error.NoAddress;
-        }
+        return @This(){
+            .src = adapter,
+            .curr_adapter = adapter,
+            .curr_address = &adapter.FirstUnicastAddress.?.IpAddress,
+        };
     }
 
     pub fn deinit(self: *@This()) void {
@@ -167,7 +154,7 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
         }
     }
 
-    pub fn next(self: *@This()) !?NetworkInterfaceAddress {
+    pub fn next(self: *@This()) ?NetworkInterfaceAddress {
         if (self.curr_address) |addr| {
             var address: ?std.net.Address = null;
             var ipv6: bool = true;
