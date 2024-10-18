@@ -185,15 +185,7 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
                 name = adapter_name[0..10];
             }
 
-            var netinf = NetworkInterfaceAddress{
-                .address = address,
-                .name = name,
-                .up = self.curr_adapter.OperStatus == .Up,
-                .family = .IPv6,
-            };
-            if (!ipv6) {
-                netinf.family = .IPv4;
-            }
+            const up = self.curr_adapter.OperStatus == .Up;
 
             // check if there are more servers
             if (addr.Next) |next_address| {
@@ -209,14 +201,27 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
                 }
             }
 
-            return netinf;
+            if (address) |aaddr| {
+                var netinf = NetworkInterfaceAddress{
+                    .address = aaddr,
+                    .name = name,
+                    .up = up,
+                    .family = .IPv6,
+                };
+                if (!ipv6) {
+                    netinf.family = .IPv4;
+                }
+                return netinf;
+            } else {
+                return self.next();
+            }
         }
         return null;
     }
 
     pub fn reset(self: *@This()) void {
         self.curr_adapter = self.src;
-        self.curr_address = &self.curr_adapter.FirstUnicastAddress.?.first_addr;
+        self.curr_address = &self.curr_adapter.FirstUnicastAddress.?.IpAddress;
     }
 };
 
