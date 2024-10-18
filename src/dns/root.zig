@@ -1,10 +1,8 @@
 const network_interface = @import("network_interface.zig");
 const socket = @import("socket.zig");
-const data = @import("data.zig");
-const mdns = @import("mdns.zig");
+pub const data = @import("data.zig");
+pub const mdns = @import("mdns.zig");
 
-pub usingnamespace network_interface;
-pub usingnamespace socket;
 pub usingnamespace data;
 pub usingnamespace mdns;
 
