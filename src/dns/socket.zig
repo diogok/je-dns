@@ -17,7 +17,9 @@ pub const Options = struct {
 /// This is a utility to connect, send and receive data from a UDP socket.
 /// Works for IPv4 and IPv6.
 pub const Socket = struct {
+    /// Address this is using.
     address: std.net.Address,
+    /// Native socket handler.
     handle: std.posix.socket_t,
 
     /// Timeout in milliseconds.

@@ -1,19 +1,28 @@
-//! Functions to get local DNS nameservers to use for DNS resolution.
+//! Functions to get network interfaces addresses.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
+/// An Address of a network interface.
 pub const NetworkInterfaceAddress = struct {
+    /// Name of the network interface.
     name: []const u8,
+    /// Family of the address.
     family: enum { IPv4, IPv6 },
+    /// The Address.
     address: std.net.Address,
+    /// If this interface is UP.
     up: bool,
 };
 
+/// Get list of all addresses of all network interfaces.
+/// Callee owns the memory.
 pub fn getNetworkInterfaceAddressess(allocator: std.mem.Allocator) ![]NetworkInterfaceAddress {
     var iter = NetworkInterfaceAddressIterator.init();
     defer iter.deinit();
+
+    // count first, to alloc the right size
     var count: usize = 0;
     while (iter.next()) |_| {
         count += 1;
@@ -21,6 +30,7 @@ pub fn getNetworkInterfaceAddressess(allocator: std.mem.Allocator) ![]NetworkInt
     iter.reset();
 
     var ifs = try allocator.alloc(NetworkInterfaceAddress, count);
+    // iter over all addresses
     var i: usize = 0;
     while (iter.next()) |if_addr| {
         ifs[i] = if_addr;
@@ -35,7 +45,9 @@ test "get list of if address" {
     try testing.expect(ifs.len >= 1);
 }
 
+/// Iterator of all Network Interfaces Addresses
 pub const NetworkInterfaceAddressIterator = if (builtin.os.tag == .windows) WindowsNetworkInterfaceAddressesIterator else PosixNetworkInterfaceAddressesIterator;
+
 // posix getifaddrs handling
 
 const sockaddr = std.c.sockaddr;
