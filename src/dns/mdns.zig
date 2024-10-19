@@ -148,7 +148,7 @@ pub const mDNSService = struct {
             }
         }
 
-        if (addr) |address| {
+        if (addr) |*address| {
             var netif_iter = netif.NetworkInterfaceAddressIterator.init();
             defer netif_iter.deinit();
             while (netif_iter.next()) |my_addr| {
@@ -156,8 +156,9 @@ pub const mDNSService = struct {
                     return null;
                 }
             }
+            address.setPort(port);
             return Peer{
-                .address = address,
+                .address = address.*,
                 .ttl_in_seconds = ttl,
             };
         }
