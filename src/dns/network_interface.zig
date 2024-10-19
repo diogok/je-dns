@@ -217,11 +217,11 @@ test "Windows NetAddresses" {
         return error.SkipZigTest;
     }
     // Not sure what to test, just making sure it can execute.
-    var iter = try WindowsNetworkInterfaceAddressesIterator.init();
+    var iter = WindowsNetworkInterfaceAddressesIterator.init();
     defer iter.deinit();
 
     var i: usize = 0;
-    while (try iter.next()) |_| {
+    while (iter.next()) |_| {
         i += 1;
     }
     try testing.expect(i >= 1);
