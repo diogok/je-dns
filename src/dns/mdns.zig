@@ -1,3 +1,6 @@
+//! This implements a mDNS DNS-SD service finder and responder.
+//! It can anounce our service as well as find peers on the network.
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -5,7 +8,8 @@ const data = @import("data.zig");
 const net = @import("socket.zig");
 const netif = @import("network_interface.zig");
 
-const Peer = struct {
+/// This is another instance of our service in this network.
+pub const Peer = struct {
     address: std.net.Address,
     ttl_in_seconds: u32,
 
@@ -17,15 +21,36 @@ const Peer = struct {
     }
 };
 
-const HOST_NAME_MAX: usize = 64;
-
-pub const mDNSService = struct {
-    sockets: [2]net.Socket,
-
+/// Our service definition.
+pub const Service = struct {
     name: []const u8,
     port: u16,
+};
 
-    pub fn init(name: []const u8, port: u16) !@This() {
+/// Max size of a hostname.
+const HOST_NAME_MAX: usize = 64;
+
+/// Options for the mDNSService instance.
+pub const mDNSServiceOptions = struct {
+    ttl_in_seconds: u32 = 600,
+    socket_options: net.Options = .{},
+};
+
+/// The main struct, contains the logic to find and announce mDNS services.
+pub const mDNSService = struct {
+    /// One socket for IPv4 and another for IPv6.
+    sockets: [2]net.Socket,
+
+    /// Name of the service
+    name: []const u8,
+    /// Port of the service
+    port: u16,
+    /// TTL of the DNS records we will send
+    ttl_in_seconds: u32,
+
+    /// Creates a new instance of this struct.
+    /// Should call deinit on the returned object once done.
+    pub fn init(service: Service, options: mDNSServiceOptions) !@This() {
         const ipv4 = try net.Socket.init(data.mdns_ipv4_address, .{});
         try ipv4.bind();
         try ipv4.multicast();
@@ -36,19 +61,22 @@ pub const mDNSService = struct {
 
         return @This(){
             .sockets = .{ ipv4, ipv6 },
-            .name = name,
-            .port = port,
+            .name = service.name,
+            .port = service.port,
+            .ttl_in_seconds = options.ttl_in_seconds,
         };
     }
 
+    /// Clear used resources.
+    /// Close sockets.
     pub fn deinit(self: *@This()) void {
         for (self.sockets) |socket| {
             socket.deinit();
         }
     }
 
-    /// query will query the network for other instances of this service.
-    /// next call to handle will probably return new peers.
+    /// This will query the network for other instances of this service.
+    /// The next call to handle will probably return new peers.
     pub fn query(self: *@This()) !void {
         // Prepare the query message
         const message = data.Message{
@@ -77,9 +105,9 @@ pub const mDNSService = struct {
         }
     }
 
-    /// Handle request to to respond with this service
-    /// as well as find new peers
-    /// should run constantly
+    /// Handle queries to respond with this service
+    /// It also finds new peers if query was called called before
+    /// It Should run constantly
     /// Might or might return a peer
     /// Should not stop on null
     pub fn handle(self: *@This(), allocator: std.mem.Allocator) !?Peer {
@@ -107,6 +135,7 @@ pub const mDNSService = struct {
         return null;
     }
 
+    /// This funtions check if this is a query or reply.
     fn handleMessage(self: *@This(), message: data.Message, family: net.Family) !?Peer {
         switch (message.header.flags.query_or_reply) {
             .reply => {
@@ -123,6 +152,8 @@ pub const mDNSService = struct {
         }
     }
 
+    /// If it is a reply, check if this contains a Peer to our service and return it.
+    /// If this reply is not about our service, returns null.
     fn handleReply(self: *@This(), message: data.Message) ?Peer {
         var name: []const u8 = "";
         var host: []const u8 = "";
@@ -148,7 +179,9 @@ pub const mDNSService = struct {
             }
         }
 
+        // If we found an address
         if (addr) |*address| {
+            // check if this is not our own address
             var netif_iter = netif.NetworkInterfaceAddressIterator.init();
             defer netif_iter.deinit();
             while (netif_iter.next()) |my_addr| {
@@ -157,15 +190,21 @@ pub const mDNSService = struct {
                 }
             }
             address.setPort(port);
+
+            // return found peer
             return Peer{
                 .address = address.*,
                 .ttl_in_seconds = ttl,
             };
         }
+
+        // if nothing found, return null
         return null;
     }
 
+    /// Response with our service information.
     fn respond(self: *@This(), family: net.Family) !void {
+        // Prepare the names we are going to send.
         var hostname_buffer: [HOST_NAME_MAX]u8 = undefined;
         var target_buffer: [HOST_NAME_MAX + 6]u8 = undefined;
         var name_buffer: [HOST_NAME_MAX + 1024]u8 = undefined;
@@ -190,16 +229,22 @@ pub const mDNSService = struct {
             },
         ) catch unreachable;
 
-        var hosts_count: u8 = 0;
+        // Query network interface addresses
         var netif_iter = netif.NetworkInterfaceAddressIterator.init();
         defer netif_iter.deinit();
+
+        // Count how many addresses we have to send
+        var hosts_count: u8 = 0;
         while (netif_iter.next()) |a| {
+            // Skip localhost
             if (a.address.eql(net.ipv4_localhost) or a.address.eql(net.ipv6_localhost)) {
                 continue;
             }
+            // only send active addresses
             if (!a.up) {
                 continue;
             }
+            // only send if the same family as requested
             if (family == .IPv4 and a.family == .IPv4) {
                 hosts_count += 1;
             } else if (family == .IPv6 and a.family == .IPv6) {
@@ -208,7 +253,7 @@ pub const mDNSService = struct {
         }
         netif_iter.reset();
 
-        // get message bytes
+        // prepare message bytes
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
 
@@ -221,18 +266,22 @@ pub const mDNSService = struct {
         };
         try header.writeTo(&stream);
 
+        // Send our service full name
         var record = data.Record{
             .name = self.name,
             .resource_type = .PTR,
+            .ttl = self.ttl_in_seconds,
             .data = .{
                 .ptr = full_service_name,
             },
         };
         try record.writeTo(&stream);
 
+        // Send the port and host
         record = data.Record{
             .name = full_service_name,
             .resource_type = .SRV,
+            .ttl = self.ttl_in_seconds,
             .data = .{
                 .srv = .{
                     .port = self.port,
@@ -244,6 +293,7 @@ pub const mDNSService = struct {
         };
         try record.writeTo(&stream);
 
+        // send available relevant addresses for our host
         while (netif_iter.next()) |addr| {
             if (!addr.up) {
                 continue;
@@ -255,6 +305,7 @@ pub const mDNSService = struct {
                 record = data.Record{
                     .name = target_host,
                     .resource_type = .A,
+                    .ttl = self.ttl_in_seconds,
                     .data = .{
                         .ip = addr.address,
                     },
@@ -264,6 +315,7 @@ pub const mDNSService = struct {
                 record = data.Record{
                     .name = target_host,
                     .resource_type = .AAAA,
+                    .ttl = self.ttl_in_seconds,
                     .data = .{
                         .ip = addr.address,
                     },
@@ -281,7 +333,8 @@ pub const mDNSService = struct {
 };
 
 test "Test a service" {
-    var mdns = try mDNSService.init("_hello._tcp._local", 8888);
+    const service = Service{ .name = "_hello._tcp._local", .port = 8888 };
+    var mdns = try mDNSService.init(service, .{});
     defer mdns.deinit();
     try mdns.query();
     _ = try mdns.handle(testing.allocator);

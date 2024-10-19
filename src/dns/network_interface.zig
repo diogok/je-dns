@@ -111,11 +111,11 @@ test "Poxis NetAddresses" {
     if (builtin.os.tag == .windows) {
         return error.SkipZigTest;
     }
-    var iter = try PosixNetworkInterfaceAddressesIterator.init();
+    var iter = PosixNetworkInterfaceAddressesIterator.init();
     defer iter.deinit();
 
     var i: usize = 0;
-    while (try iter.next()) |_| {
+    while (iter.next()) |_| {
         i += 1;
     }
     try testing.expect(i >= 1);
