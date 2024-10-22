@@ -4,6 +4,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
+pub const NAME_MAX_SIZE = 253;
+
 /// This is a DNS message, used both for queries and responses.
 pub const Message = struct {
     allocator: ?std.mem.Allocator = null,
@@ -590,7 +592,7 @@ test "read txt" {
 /// The end is byte '0'.
 /// A section maybe a pointer to another section elsewhere.
 fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
-    var name_buffer: [253]u8 = undefined;
+    var name_buffer: [NAME_MAX_SIZE]u8 = undefined;
     var name_len: usize = 0;
 
     var seekBackTo: u64 = 0;

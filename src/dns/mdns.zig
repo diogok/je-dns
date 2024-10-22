@@ -206,8 +206,8 @@ pub const mDNSService = struct {
     fn respond(self: *@This(), family: net.Family) !void {
         // Prepare the names we are going to send.
         var hostname_buffer: [HOST_NAME_MAX]u8 = undefined;
-        var target_buffer: [HOST_NAME_MAX + 6]u8 = undefined;
-        var name_buffer: [HOST_NAME_MAX + 1024]u8 = undefined;
+        var target_buffer: [data.NAME_MAX_SIZE]u8 = undefined;
+        var name_buffer: [data.NAME_MAX_SIZE]u8 = undefined;
 
         _ = std.c.gethostname(&hostname_buffer, HOST_NAME_MAX);
         const hostname = std.mem.span(@as([*c]u8, &hostname_buffer));
