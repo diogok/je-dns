@@ -51,7 +51,6 @@ pub const Socket = struct {
     /// Send the data (up to 512 bytes) in single packet.
     /// Timeout applies.
     pub fn sendBytes(self: @This(), bytes: []const u8) !void {
-        std.debug.assert(bytes.len <= 512);
         _ = try std.posix.sendto(
             self.handle,
             bytes,

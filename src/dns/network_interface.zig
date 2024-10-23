@@ -160,10 +160,7 @@ const WindowsNetworkInterfaceAddressesIterator = struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        const r = HeapFree(GetProcessHeap(), 0, self.src);
-        if (r == 0) {
-            std.debug.print("HeapFree failed to free nameservers: {d}\n", .{r});
-        }
+        _ = HeapFree(GetProcessHeap(), 0, self.src);
     }
 
     pub fn next(self: *@This()) ?NetworkInterfaceAddress {

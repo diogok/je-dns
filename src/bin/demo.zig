@@ -6,10 +6,6 @@ const dns = @import("dns");
 const log = std.log.scoped(.mdns_demo);
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(gpa.deinit() != .leak);
-    const allocator = gpa.allocator();
-
     // This is our service definition.
     // We need to define the service name, following DNS-SD standard, and a port.
     const my_service = dns.Service{
@@ -36,7 +32,7 @@ pub fn main() !void {
         // Handle function will both receive queries and answer with our address.
         // As well as receive answers and return peers.
         // You should keep calling it forever to be sure we can always answer queries.
-        if (try mdns.handle(allocator)) |peer| {
+        if (try mdns.handle()) |peer| {
             peer_list.found(peer);
         }
         // Here we log all current peers.

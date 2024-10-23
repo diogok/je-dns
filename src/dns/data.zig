@@ -5,80 +5,49 @@ const builtin = @import("builtin");
 const testing = std.testing;
 
 pub const NAME_MAX_SIZE = 253;
+pub const PACKET_SIZE = 512;
 
-/// This is a DNS message, used both for queries and responses.
-pub const Message = struct {
-    allocator: ?std.mem.Allocator = null,
+pub fn MessageReader(StreamType: type) type {
+    return struct {
+        stream: StreamType,
+        buffer: [PACKET_SIZE]u8 = undefined,
 
-    header: Header = Header{},
-    questions: []const Question = &[_]Question{},
-    records: []const Record = &[_]Record{},
+        header: Header,
 
-    /// Read message from a Stream.
-    pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
-        const header = try Header.read(stream);
+        q: usize = 0,
+        r: usize = 0,
 
-        var q: usize = 0;
-        var questions = try allocator.alloc(Question, header.number_of_questions);
-        errdefer {
-            var i: usize = 0;
-            while (i < q) : (i += 1) {
-                questions[i].deinit(allocator);
+        pub fn init(stream: StreamType) !@This() {
+            return @This(){
+                .stream = stream,
+                .header = try Header.read(stream),
+            };
+        }
+
+        pub fn nextQuestion(self: *@This()) !?Question {
+            if (self.q < self.header.number_of_questions) {
+                self.q += 1;
+                return try Question.read(&self.buffer, self.stream);
+            } else {
+                return null;
             }
-            allocator.free(questions);
-        }
-        while (q < questions.len) : (q += 1) {
-            questions[q] = try Question.read(allocator, stream);
         }
 
-        const total_records = header.number_of_answers + header.number_of_additional_resource_records + header.number_of_authority_resource_records;
-        var r: usize = 0;
-        var records = try allocator.alloc(Record, total_records);
-        errdefer {
-            var i: usize = 0;
-            while (i < r) : (i += 1) {
-                records[i].deinit(allocator);
+        pub fn nextRecord(self: *@This()) !?Record {
+            const max = self.header.number_of_answers + self.header.number_of_additional_resource_records + self.header.number_of_authority_resource_records;
+            if (self.r < max) {
+                self.r += 1;
+                return try Record.read(&self.buffer, self.stream);
+            } else {
+                return null;
             }
-            allocator.free(records);
         }
-        while (r < records.len) : (r += 1) {
-            records[r] = try Record.read(allocator, stream);
-        }
+    };
+}
 
-        return @This(){
-            .allocator = allocator,
-            .header = header,
-            .questions = questions,
-            .records = records,
-        };
-    }
-
-    /// Write message to a stream.
-    pub fn writeTo(self: @This(), stream: anytype) !void {
-        try self.header.writeTo(stream);
-        for (self.questions) |question| {
-            try question.writeTo(stream);
-        }
-        for (self.records) |record| {
-            try record.writeTo(stream);
-        }
-    }
-
-    /// Free used memory.
-    pub fn deinit(self: @This()) void {
-        if (self.allocator) |allocator| {
-            for (self.questions) |q| {
-                allocator.free(q.name);
-            }
-            allocator.free(self.questions);
-
-            for (self.records) |r| {
-                r.deinit(allocator);
-            }
-            allocator.free(self.records);
-        }
-    }
-};
+pub fn messageReader(stream: anytype) !MessageReader(@TypeOf(stream)) {
+    return try MessageReader(@TypeOf(stream)).init(stream);
+}
 
 /// The first part of a DNS Message.
 pub const Header = packed struct {
@@ -204,10 +173,9 @@ pub const Question = struct {
     resource_class: ResourceClass = .IN,
 
     /// Read question from stream.
-    pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
+    pub fn read(buffer: []u8, stream: anytype) !@This() {
         // There are special rules for reading a name.
-        const name = try readName(allocator, stream);
-        errdefer allocator.free(name);
+        const name = try readNameBuffer(buffer, stream);
 
         var reader = stream.reader();
         const r_type = try reader.readInt(u16, .big);
@@ -227,11 +195,6 @@ pub const Question = struct {
         try writer.writeInt(u16, @intFromEnum(self.resource_type), .big);
         try writer.writeInt(u16, @intFromEnum(self.resource_class), .big);
     }
-
-    /// Clean-up and free memory.
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-    }
 };
 
 /// The information about a DNS Record
@@ -244,9 +207,8 @@ pub const Record = struct {
     data: RecordData,
 
     /// Read resource from stream.
-    pub fn read(allocator: std.mem.Allocator, stream: anytype) !@This() {
-        const name = try readName(allocator, stream);
-        errdefer allocator.free(name);
+    pub fn read(buffer: []u8, stream: anytype) !@This() {
+        const name = try readNameBuffer(buffer[0..NAME_MAX_SIZE], stream);
 
         var reader = stream.reader();
         const r_type = try reader.readInt(u16, .big);
@@ -256,14 +218,14 @@ pub const Record = struct {
         const resource_type: ResourceType = @enumFromInt(r_type);
         const resource_class: ResourceClass = @enumFromInt(r_class & 0b1);
 
-        const extra = try RecordData.read(allocator, resource_type, stream);
+        const record_data = try RecordData.read(buffer[NAME_MAX_SIZE..], resource_type, stream);
 
         return @This(){
             .resource_type = resource_type,
             .resource_class = resource_class,
             .ttl = ttl,
             .name = name,
-            .data = extra,
+            .data = record_data,
         };
     }
 
@@ -276,12 +238,46 @@ pub const Record = struct {
         try writer.writeInt(u32, self.ttl, .big);
         try self.data.writeTo(stream);
     }
+};
 
-    /// Clean-up and free memory.
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        self.data.deinit(allocator);
+pub const TXTIter = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    pub fn next(self: *@This()) ?[]const u8 {
+        if (self.pos >= self.data.len) {
+            return null;
+        }
+        const txt_len = self.data[self.pos];
+        self.pos += 1;
+        defer self.pos += txt_len;
+        return self.data[self.pos .. self.pos + txt_len];
     }
+
+    pub fn toBytes(buffer: []u8, txt: []const []const u8) []const u8 {
+        var pos: usize = 0;
+        for (txt) |t| {
+            buffer[pos] = @truncate(t.len);
+            pos += 1;
+            std.mem.copyForwards(u8, buffer[pos..], t);
+            pos += t.len;
+        }
+        return buffer[0..pos];
+    }
+
+    pub fn calcSize(txt: []const []const u8) usize {
+        var pos: usize = 0;
+        for (txt) |t| {
+            pos += t.len + 1;
+        }
+    }
+};
+
+pub const SRV = struct {
+    priority: u16,
+    weight: u16,
+    port: u16,
+    target: []const u8,
 };
 
 /// The data that a Record hold,
@@ -290,15 +286,9 @@ pub const RecordData = union(enum) {
     /// IPv4 or IPv6 address, for records like A or AAAA.
     ip: std.net.Address,
     /// Services information
-    srv: struct {
-        priority: u16,
-        weight: u16,
-        port: u16,
-        /// Domain name like
-        target: []const u8,
-    },
+    srv: SRV,
     /// For TXT records, a list of strings
-    txt: []const []const u8,
+    txt: []const u8,
     /// For PTR, likely a new domain, used in dns-sd for example.
     /// Works like a domain name
     ptr: []const u8,
@@ -306,7 +296,7 @@ pub const RecordData = union(enum) {
     raw: []const u8,
 
     /// Read the record data from stream, need to know the resource type.
-    pub fn read(allocator: std.mem.Allocator, resource_type: ResourceType, stream: anytype) !@This() {
+    pub fn read(buffer: []u8, resource_type: ResourceType, stream: anytype) !@This() {
         var reader = stream.reader();
 
         // Make sure we leave the stream at the end of the data.
@@ -326,50 +316,27 @@ pub const RecordData = union(enum) {
                 return .{ .ip = std.net.Address.initIp6(bytes, 0, 0, 0) };
             },
             .PTR => {
-                return .{ .ptr = try readName(allocator, stream) };
+                return .{ .ptr = try readNameBuffer(buffer, stream) };
             },
             .SRV => {
                 return .{
-                    .srv = .{
+                    .srv = SRV{
                         .weight = try reader.readInt(u16, .big),
                         .priority = try reader.readInt(u16, .big),
                         .port = try reader.readInt(u16, .big),
-                        .target = try readName(allocator, stream),
+                        .target = try readNameBuffer(buffer, stream),
                     },
                 };
             },
             .TXT => {
-                var txts_buffer: [16][]const u8 = undefined;
-                var txts_len: usize = 0;
-
-                errdefer {
-                    var i: usize = 0;
-                    while (i < txts_len) : (i += 1) {
-                        allocator.free(txts_buffer[i]);
-                    }
-                }
-
-                // TODO: split?
-                var total: usize = 0;
-                while (total < len) {
-                    const txt_len = try reader.readByte();
-                    const txt = try allocator.alloc(u8, txt_len);
-                    errdefer allocator.free(txt);
-
-                    _ = try reader.read(txt);
-                    total += txt_len + 1;
-
-                    txts_buffer[txts_len] = txt;
-                    txts_len += 1;
-                }
-
-                const txts = try allocator.dupe([]const u8, txts_buffer[0..txts_len]);
-                return .{ .txt = txts };
+                const data = buffer[0..len];
+                _ = try reader.read(data);
+                return .{ .txt = data };
             },
             else => {
-                const bytes = try allocator.alloc(u8, len);
-                _ = try reader.read(bytes);
-                return .{ .raw = bytes };
+                const data = buffer[0..len];
+                _ = try reader.read(data);
+                return .{ .raw = data };
             },
         }
     }
@@ -402,46 +369,13 @@ pub const RecordData = union(enum) {
                 try writer.writeInt(u16, srv.port, .big);
                 try writeName(writer, srv.target);
             },
-            .txt => |txt| {
-                var size: u16 = @truncate(txt.len);
-                for (txt) |t| {
-                    size += @truncate(t.len);
-                }
-                try writer.writeInt(u16, size, .big);
-                for (txt) |t| {
-                    try writer.writeInt(u8, @truncate(t.len), .big);
-                    _ = try writer.write(t);
-                }
-            },
             .ptr => |ptr| {
                 try writer.writeInt(u16, @truncate(ptr.len + 2), .big);
                 try writeName(writer, ptr);
             },
-            .raw => |bytes| {
+            .raw, .txt => |bytes| {
                 try writer.writeInt(u16, @truncate(bytes.len), .big);
                 _ = try writer.write(bytes);
-            },
-        }
-    }
-
-    /// Clean-up and free memory.
-    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
-        switch (self) {
-            .ip => {},
-            .srv => |srv| {
-                allocator.free(srv.target);
-            },
-            .txt => |text| {
-                for (text) |txt| {
-                    allocator.free(txt);
-                }
-                allocator.free(text);
-            },
-            .ptr => |ptr| {
-                allocator.free(ptr);
-            },
-            .raw => |bytes| {
-                allocator.free(bytes);
             },
         }
     }
@@ -548,11 +482,15 @@ test "write txt" {
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
 
+    var txt_buffer: [128]u8 = undefined;
     const data = RecordData{
-        .txt = &[_][]const u8{
-            "hello=world",
-            "foo=bar",
-        },
+        .txt = TXTIter.toBytes(
+            &txt_buffer,
+            &[_][]const u8{
+                "hello=world",
+                "foo=bar",
+            },
+        ),
     };
 
     try data.writeTo(&stream);
@@ -578,12 +516,13 @@ test "read txt" {
     };
     var stream = std.io.fixedBufferStream(&data);
 
-    const record = try RecordData.read(testing.allocator, .TXT, &stream);
-    defer record.deinit(testing.allocator);
+    var buffer: [512]u8 = undefined;
+    const record = try RecordData.read(&buffer, .TXT, &stream);
+    var txt_iter = TXTIter{ .data = record.txt };
 
-    try testing.expectEqual(2, record.txt.len);
-    try testing.expectEqualStrings("hello=world", record.txt[0]);
-    try testing.expectEqualStrings("foo=bar", record.txt[1]);
+    try testing.expectEqualStrings("hello=world", txt_iter.next().?);
+    try testing.expectEqualStrings("foo=bar", txt_iter.next().?);
+    try testing.expect(txt_iter.next() == null);
 }
 
 /// Read a name from a DNS message.
@@ -591,8 +530,7 @@ test "read txt" {
 /// Each section (.) is prefixed with the length of that section.
 /// The end is byte '0'.
 /// A section maybe a pointer to another section elsewhere.
-fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
-    var name_buffer: [NAME_MAX_SIZE]u8 = undefined;
+fn readNameBuffer(name_buffer: []u8, stream: anytype) ![]const u8 {
     var name_len: usize = 0;
 
     var seekBackTo: u64 = 0;
@@ -628,7 +566,7 @@ fn readName(allocator: std.mem.Allocator, stream: anytype) ![]const u8 {
         try stream.seekTo(seekBackTo);
     }
 
-    return try allocator.dupe(u8, name_buffer[0..name_len]);
+    return name_buffer[0..name_len];
 }
 
 /// Writes a name in the format of DNS names.
@@ -759,40 +697,40 @@ test "Write a message" {
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
 
-    var message = Message{};
-    message.header.ID = 38749;
-    message.header.flags.recursion_available = true;
-    message.header.flags.recursion_desired = true;
-    message.header.number_of_questions = 1;
-    message.header.number_of_additional_resource_records = 2;
-    message.questions = &[_]Question{
-        .{
-            .name = "example.com",
-            .resource_type = .A,
-        },
-    };
-    message.records = &[_]Record{
-        .{
-            .name = "example.com",
-            .resource_type = .A,
-            .resource_class = .IN,
-            .ttl = 16777472,
-            .data = RecordData{
-                .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
-            },
-        },
-        .{
-            .name = "example.com",
-            .resource_type = .AAAA,
-            .resource_class = .IN,
-            .ttl = 16777472,
-            .data = RecordData{
-                .ip = std.net.Address.initIp6([16]u8{ 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0),
-            },
-        },
-    };
+    var header = Header{};
+    header.ID = 38749;
+    header.flags.recursion_available = true;
+    header.flags.recursion_desired = true;
+    header.number_of_questions = 1;
+    header.number_of_additional_resource_records = 2;
+    try header.writeTo(&stream);
 
-    try message.writeTo(&stream);
+    const question = Question{
+        .name = "example.com",
+        .resource_type = .A,
+    };
+    try question.writeTo(&stream);
+
+    const record0 = Record{
+        .name = "example.com",
+        .resource_type = .A,
+        .resource_class = .IN,
+        .ttl = 16777472,
+        .data = RecordData{
+            .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
+        },
+    };
+    try record0.writeTo(&stream);
+    const record1 = Record{
+        .name = "example.com",
+        .resource_type = .AAAA,
+        .resource_class = .IN,
+        .ttl = 16777472,
+        .data = RecordData{
+            .ip = std.net.Address.initIp6([16]u8{ 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0),
+        },
+    };
+    try record1.writeTo(&stream);
 
     const written = stream.getWritten();
     const example_query = [_]u8{
@@ -869,8 +807,7 @@ test "Read a message" {
 
     var stream = std.io.fixedBufferStream(buffer[0..]);
 
-    const reply = try Message.read(testing.allocator, &stream);
-    defer reply.deinit();
+    var reply = try messageReader(&stream);
 
     try testing.expectEqual(reply.header.ID, 256);
     try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
@@ -879,92 +816,101 @@ test "Read a message" {
     try testing.expectEqual(reply.header.flags.response_code, .no_error);
     try testing.expectEqual(reply.header.number_of_questions, 1);
     try testing.expectEqual(reply.header.number_of_answers, 2);
-    try testing.expectEqual(reply.questions.len, 1);
-    try testing.expectEqual(reply.records.len, 4);
 
-    try testing.expectEqualStrings(reply.questions[0].name, "example.com");
-    try testing.expectEqual(reply.questions[0].resource_type, ResourceType.A);
-    try testing.expectEqual(reply.questions[0].resource_class, ResourceClass.IN);
+    const question = (try reply.nextQuestion()).?;
+    try testing.expectEqualStrings(question.name, "example.com");
+    try testing.expectEqual(question.resource_type, ResourceType.A);
+    try testing.expectEqual(question.resource_class, ResourceClass.IN);
+    try testing.expect(try reply.nextQuestion() == null);
 
-    try testing.expectEqualStrings(reply.records[0].name, "example.com");
-    try testing.expectEqual(reply.records[0].resource_type, ResourceType.A);
-    try testing.expectEqual(reply.records[0].resource_class, ResourceClass.IN);
-    try testing.expectEqual(reply.records[0].ttl, 16777472);
+    const record0 = (try reply.nextRecord()).?;
+    try testing.expectEqualStrings(record0.name, "example.com");
+    try testing.expectEqual(record0.resource_type, ResourceType.A);
+    try testing.expectEqual(record0.resource_class, ResourceClass.IN);
+    try testing.expectEqual(record0.ttl, 16777472);
 
     const ip1234 = try std.net.Address.parseIp("1.2.3.4", 0);
-    try testing.expect(reply.records[0].data.ip.eql(ip1234));
+    try testing.expect(record0.data.ip.eql(ip1234));
 
-    try testing.expectEqualStrings(reply.records[1].name, "www.example.com");
+    const record1 = (try reply.nextRecord()).?;
+    try testing.expectEqualStrings(record1.name, "www.example.com");
     const ip4321 = try std.net.Address.parseIp("4.3.2.1", 0);
-    try testing.expect(reply.records[1].data.ip.eql(ip4321));
+    try testing.expect(record1.data.ip.eql(ip4321));
 
-    try testing.expectEqualStrings(reply.records[2].name, "ww2.example.com");
-    try testing.expectEqualStrings(reply.records[3].name, "ww1.example.com");
+    const record2 = (try reply.nextRecord()).?;
+    try testing.expectEqualStrings(record2.name, "ww2.example.com");
+
+    const record3 = (try reply.nextRecord()).?;
+    try testing.expectEqualStrings(record3.name, "ww1.example.com");
+
+    try testing.expect(try reply.nextRecord() == null);
 }
 
 test "Write and read the same message" {
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
 
-    var message = Message{};
-    message.header.ID = 38749;
-    message.header.flags.recursion_available = true;
-    message.header.flags.recursion_desired = true;
-    message.header.number_of_questions = 1;
-    message.header.number_of_additional_resource_records = 2;
-    message.questions = &[_]Question{
-        .{
-            .name = "example.com",
-            .resource_type = .A,
-        },
-    };
-    message.records = &[_]Record{
-        .{
-            .name = "example.com",
-            .resource_type = .A,
-            .resource_class = .IN,
-            .ttl = 16777472,
-            .data = RecordData{
-                .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
-            },
-        },
-        .{
-            .name = "example.com",
-            .resource_type = .AAAA,
-            .resource_class = .IN,
-            .ttl = 16777472,
-            .data = RecordData{
-                .ip = std.net.Address.initIp6([16]u8{ 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0),
-            },
-        },
-    };
+    var header = Header{};
+    header.ID = 38749;
+    header.flags.recursion_available = true;
+    header.flags.recursion_desired = true;
+    header.number_of_questions = 1;
+    header.number_of_additional_resource_records = 2;
+    try header.writeTo(&stream);
 
-    try message.writeTo(&stream);
+    const question = Question{
+        .name = "example.com",
+        .resource_type = .A,
+    };
+    try question.writeTo(&stream);
+
+    const record0 = Record{
+        .name = "example.com",
+        .resource_type = .A,
+        .resource_class = .IN,
+        .ttl = 16777472,
+        .data = RecordData{
+            .ip = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0),
+        },
+    };
+    try record0.writeTo(&stream);
+
+    const record1 = Record{
+        .name = "example.com",
+        .resource_type = .AAAA,
+        .resource_class = .IN,
+        .ttl = 16777472,
+        .data = RecordData{
+            .ip = std.net.Address.initIp6([16]u8{ 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0),
+        },
+    };
+    try record1.writeTo(&stream);
+
     const written = stream.getWritten();
 
     var stream2 = std.io.fixedBufferStream(written);
-    var message2 = try Message.read(testing.allocator, &stream2);
-    defer message2.deinit();
+    var message_reader = try messageReader(&stream2);
 
-    try testing.expectEqual(message.header, message2.header);
-    try testing.expectEqual(message.questions.len, message2.questions.len);
-    try testing.expectEqual(message.records.len, message2.records.len);
+    try testing.expectEqual(header, message_reader.header);
 
-    try testing.expectEqualStrings(message.questions[0].name, message2.questions[0].name);
-    try testing.expectEqual(message.questions[0].resource_class, message2.questions[0].resource_class);
-    try testing.expectEqual(message.questions[0].resource_type, message2.questions[0].resource_type);
+    const read_question = (try message_reader.nextQuestion()).?;
+    try testing.expectEqualStrings(question.name, read_question.name);
+    try testing.expectEqual(question.resource_class, read_question.resource_class);
+    try testing.expectEqual(question.resource_type, read_question.resource_type);
 
-    try testing.expectEqualStrings(message.records[0].name, message2.records[0].name);
-    try testing.expectEqual(message.records[0].ttl, message2.records[0].ttl);
-    try testing.expectEqual(message.records[0].resource_class, message2.records[0].resource_class);
-    try testing.expectEqual(message.records[0].resource_type, message2.records[0].resource_type);
-    try testing.expect(message.records[0].data.ip.eql(message2.records[0].data.ip));
+    const read_record0 = (try message_reader.nextRecord()).?;
+    try testing.expectEqualStrings(record0.name, read_record0.name);
+    try testing.expectEqual(record0.ttl, read_record0.ttl);
+    try testing.expectEqual(record0.resource_class, read_record0.resource_class);
+    try testing.expectEqual(record0.resource_type, read_record0.resource_type);
+    try testing.expect(record0.data.ip.eql(read_record0.data.ip));
 
-    try testing.expectEqualStrings(message.records[1].name, message2.records[1].name);
-    try testing.expectEqual(message.records[1].ttl, message2.records[1].ttl);
-    try testing.expectEqual(message.records[1].resource_class, message2.records[1].resource_class);
-    try testing.expectEqual(message.records[1].resource_type, message2.records[1].resource_type);
-    try testing.expect(message.records[1].data.ip.eql(message2.records[1].data.ip));
+    const read_record1 = (try message_reader.nextRecord()).?;
+    try testing.expectEqualStrings(record1.name, read_record1.name);
+    try testing.expectEqual(record1.ttl, read_record1.ttl);
+    try testing.expectEqual(record1.resource_class, read_record1.resource_class);
+    try testing.expectEqual(record1.resource_type, read_record1.resource_type);
+    try testing.expect(record1.data.ip.eql(read_record1.data.ip));
 }
 
 /// Check if this is a .local address.

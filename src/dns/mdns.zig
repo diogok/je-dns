@@ -78,28 +78,25 @@ pub const mDNSService = struct {
     /// This will query the network for other instances of this service.
     /// The next call to handle will probably return new peers.
     pub fn query(self: *@This()) !void {
-        // Prepare the query message
-        const message = data.Message{
-            .allocator = null,
-            .header = .{
-                .ID = 0,
-                .number_of_questions = 1,
-            },
-            .questions = &[_]data.Question{
-                .{
-                    .name = self.name,
-                    .resource_type = .PTR,
-                },
-            },
-        };
-
         // get message bytes
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
-        try message.writeTo(&stream);
-        const bytes = stream.getWritten();
+
+        // Prepare the query message
+        const header = data.Header{
+            .ID = 0,
+            .number_of_questions = 1,
+        };
+        try header.writeTo(&stream);
+
+        const question = data.Question{
+            .name = self.name,
+            .resource_type = .PTR,
+        };
+        try question.writeTo(&stream);
 
         // Sends the message to all sockets
+        const bytes = stream.getWritten();
         for (self.sockets) |socket| {
             try socket.sendBytes(bytes);
         }
@@ -110,7 +107,7 @@ pub const mDNSService = struct {
     /// It Should run constantly
     /// Might or might return a peer
     /// Should not stop on null
-    pub fn handle(self: *@This(), allocator: std.mem.Allocator) !?Peer {
+    pub fn handle(self: *@This()) !?Peer {
         var buffer: [512]u8 = undefined;
         sockets: for (self.sockets) |socket| {
             receiving: while (true) {
@@ -121,11 +118,10 @@ pub const mDNSService = struct {
                 // parse the message
                 // if it fails it is probably invalid message
                 // so continue to try next message
-                const message = data.Message.read(allocator, &stream) catch continue :receiving;
-                defer message.deinit();
+                var message_reader = data.messageReader(&stream) catch continue :receiving;
 
                 // handle the message
-                if (try self.handleMessage(message, socket.getFamily())) |peer| {
+                if (try self.handleMessage(&message_reader, socket.getFamily())) |peer| {
                     // if the message contained a peer, return it
                     return peer;
                     // else just continue to next message or socket
@@ -136,13 +132,13 @@ pub const mDNSService = struct {
     }
 
     /// This funtions check if this is a query or reply.
-    fn handleMessage(self: *@This(), message: data.Message, family: net.Family) !?Peer {
-        switch (message.header.flags.query_or_reply) {
+    fn handleMessage(self: *@This(), message_reader: anytype, family: net.Family) !?Peer {
+        switch (message_reader.header.flags.query_or_reply) {
             .reply => {
-                return self.handleReply(message);
+                return try self.handleReply(message_reader);
             },
             .query => {
-                for (message.questions) |q| {
+                while (try message_reader.nextQuestion()) |q| {
                     if (std.mem.eql(u8, q.name, self.name)) {
                         try self.respond(family);
                     }
@@ -154,14 +150,14 @@ pub const mDNSService = struct {
 
     /// If it is a reply, check if this contains a Peer to our service and return it.
     /// If this reply is not about our service, returns null.
-    fn handleReply(self: *@This(), message: data.Message) ?Peer {
+    fn handleReply(self: *@This(), message_reader: anytype) !?Peer {
         var name: []const u8 = "";
         var host: []const u8 = "";
         var port: u16 = 0;
         var addr: ?std.net.Address = null;
         var ttl: u32 = 0;
 
-        for (message.records) |record| {
+        while (try message_reader.nextRecord()) |record| {
             if (std.mem.eql(u8, record.name, self.name) and record.resource_type == .PTR) {
                 name = record.data.ptr;
             }
@@ -337,9 +333,9 @@ test "Test a service" {
     var mdns = try mDNSService.init(service, .{});
     defer mdns.deinit();
     try mdns.query();
-    _ = try mdns.handle(testing.allocator);
-    _ = try mdns.handle(testing.allocator);
-    _ = try mdns.handle(testing.allocator);
+    _ = try mdns.handle();
+    _ = try mdns.handle();
+    _ = try mdns.handle();
 }
 
 /// A static list of Peers.
