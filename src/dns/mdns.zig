@@ -151,6 +151,7 @@ pub const mDNSService = struct {
     /// If it is a reply, check if this contains a Peer to our service and return it.
     /// If this reply is not about our service, returns null.
     fn handleReply(self: *@This(), message_reader: anytype) !?Peer {
+        var buffer: [data.NAME_MAX_SIZE]u8 = undefined;
         var name: []const u8 = "";
         var host: []const u8 = "";
         var port: u16 = 0;
@@ -159,11 +160,13 @@ pub const mDNSService = struct {
 
         while (try message_reader.nextRecord()) |record| {
             if (std.mem.eql(u8, record.name, self.name) and record.resource_type == .PTR) {
-                name = record.data.ptr;
+                std.mem.copyForwards(u8, &buffer, record.data.ptr);
+                name = buffer[0..record.data.ptr.len];
             }
             if (std.mem.eql(u8, name, record.name) and record.resource_type == .SRV) {
+                std.mem.copyForwards(u8, &buffer, record.data.srv.target);
+                host = buffer[0..record.data.srv.target.len];
                 port = record.data.srv.port;
-                host = record.data.srv.target;
             }
             if (std.mem.eql(u8, host, record.name) and record.resource_type == .A) {
                 addr = record.data.ip;

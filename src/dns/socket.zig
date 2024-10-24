@@ -367,65 +367,25 @@ test "Socket connect ip6 multicast" {
     sock.deinit();
 }
 
-const IPV4 = switch (builtin.os.tag) {
-    .windows => 0,
-    .linux => 0,
-    else => @compileError("UNSUPPORTED OS"),
-};
+const c = @cImport({
+    switch (builtin.os.tag) {
+        .windows => @cInclude("ws2tcpip.h"),
+        else => @cInclude("arpa/inet.h"),
+    }
+});
 
-const IPV6 = switch (builtin.os.tag) {
-    .windows => 41,
-    .linux => 41,
-    else => @compileError("UNSUPPORTED OS"),
-};
+const IPV4 = c.IPPROTO_IP;
+const IPV6 = c.IPPROTO_IPV6;
 
-const IP_MULTICAST_IF = switch (builtin.os.tag) {
-    .windows => 9,
-    .linux => 32,
-    else => @compileError("UNSUPPORTED OS"),
-};
+const IP_MULTICAST_IF = c.IP_MULTICAST_IF;
+const IP_MULTICAST_TTL = c.IP_MULTICAST_TTL;
+const IP_MULTICAST_LOOP = c.IP_MULTICAST_LOOP;
+const IP_ADD_MEMBERSHIP = c.IP_ADD_MEMBERSHIP;
 
-const IP_MULTICAST_TTL = switch (builtin.os.tag) {
-    .windows => 3,
-    .linux => 33,
-    else => @compileError("UNSUPPORTED OS"),
-};
-
-const IP_MULTICAST_LOOP = switch (builtin.os.tag) {
-    .windows => 11,
-    .linux => 34,
-    else => @compileError("UNSUPPORTED OS"),
-};
-
-const IP_ADD_MEMBERSHIP = switch (builtin.os.tag) {
-    .windows => 12,
-    .linux => 35,
-    else => @compileError("UNSUPPORTED OS"),
-};
-
-const IPV6_MULTICAST_IF = switch (builtin.os.tag) {
-    .windows => 9,
-    .linux => 17,
-    else => @compileError("UNSUPPORTED OS"),
-};
-
-const IPV6_MULTICAST_HOPS = switch (builtin.os.tag) {
-    .windows => 10,
-    .linux => 18,
-    else => @compileError("UNSUPPORTED OS"),
-};
-
-const IPV6_MULTICAST_LOOP = switch (builtin.os.tag) {
-    .windows => 11,
-    .linux => 19,
-    else => @compileError("UNSUPPORTED OS"),
-};
-
-const IPV6_ADD_MEMBERSHIP = switch (builtin.os.tag) {
-    .windows => 12,
-    .linux => 20,
-    else => @compileError("UNSUPPORTED OS"),
-};
+const IPV6_MULTICAST_IF = c.IPV6_MULTICAST_IF;
+const IPV6_MULTICAST_HOPS = c.IPV6_MULTICAST_HOPS;
+const IPV6_MULTICAST_LOOP = c.IPV6_MULTICAST_LOOP;
+const IPV6_ADD_MEMBERSHIP = c.IPV6_ADD_MEMBERSHIP;
 
 pub const ipv4_localhost = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0);
 pub const ipv6_localhost = std.net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0);

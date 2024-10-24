@@ -6,7 +6,7 @@ For usage see the [documentation](https://diogok.github.io/je-mdns) or the demo 
 
 ## Links
 
-Main reference used was: http://www.tcpipguide.com/free/t_TCPIPDomainNameSystemDNS.htm
+Main reference used was: http://www.tcpipguide.com/free/t_TCPIPDomainNameSystemDNS.htm and some of the RFCs.
 
 ## License
 
