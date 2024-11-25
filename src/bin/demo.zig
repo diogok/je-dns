@@ -23,21 +23,16 @@ pub fn main() !void {
     // It will eventually return a data in the Handle function below.
     try mdns.query();
 
-    // This provide a limited space for storing peers found.
-    // It handles expiration as well
-    var peer_list = dns.Peers{};
-
     // Our main loop.
     while (true) {
         // Handle function will both receive queries and answer with our address.
         // As well as receive answers and return peers.
         // You should keep calling it forever to be sure we can always answer queries.
         if (try mdns.handle()) |peer| {
-            peer_list.found(peer);
-        }
-        // Here we log all current peers.
-        for (peer_list.peers()) |peer| {
-            log.info("Peer: {any}", .{peer});
+            log.info("Peer {s}", .{peer.name});
+            for (peer.addresses) |addr| {
+                log.info("Addr {any}", .{addr});
+            }
         }
     }
 }

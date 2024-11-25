@@ -4,50 +4,61 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
+/// Max size of a DNS name, like a full host.
 pub const NAME_MAX_SIZE = 253;
+
+/// Size of a UDP packet.
 pub const PACKET_SIZE = 512;
 
-pub fn MessageReader(StreamType: type) type {
-    return struct {
-        stream: StreamType,
-        buffer: [PACKET_SIZE]u8 = undefined,
+/// Stream fo an UDP packet.
+const PacketStream = std.io.FixedBufferStream([]const u8);
 
-        header: Header,
+/// An reader and iterator to read a DNS message from a UDP packet.
+/// Headers are read on initialization.
+/// You should read all the Questions, them all the records.
+pub const MessageReader = struct {
+    buffer: [PACKET_SIZE]u8 = undefined,
+    stream: PacketStream = undefined,
 
-        q: usize = 0,
-        r: usize = 0,
+    header: Header = Header{},
 
-        pub fn init(stream: StreamType) !@This() {
-            return @This(){
-                .stream = stream,
-                .header = try Header.read(stream),
-            };
+    q: usize = 0,
+    r: usize = 0,
+
+    /// Create the reader, expect the message bytes.
+    pub fn init(bytes: []const u8) !@This() {
+        var self = @This(){};
+        self.stream = std.io.fixedBufferStream(bytes);
+        self.header = try Header.read(&self.stream);
+        if (self.header.flags.truncation) {
+            return error.MessageTruncated;
         }
+        return self;
+    }
 
-        pub fn nextQuestion(self: *@This()) !?Question {
-            if (self.q < self.header.number_of_questions) {
-                self.q += 1;
-                return try Question.read(&self.buffer, self.stream);
-            } else {
-                return null;
-            }
+    /// Return the next(or frst) question from the message.
+    /// Returns null when there are no more questions.
+    pub fn nextQuestion(self: *@This()) !?Question {
+        if (self.q < self.header.number_of_questions) {
+            self.q += 1;
+            return try Question.read(&self.buffer, &self.stream);
+        } else {
+            return null;
         }
+    }
 
-        pub fn nextRecord(self: *@This()) !?Record {
-            const max = self.header.number_of_answers + self.header.number_of_additional_resource_records + self.header.number_of_authority_resource_records;
-            if (self.r < max) {
-                self.r += 1;
-                return try Record.read(&self.buffer, self.stream);
-            } else {
-                return null;
-            }
+    /// Return the next(or frst) record from the message.
+    /// Returns null when there are no more record.
+    pub fn nextRecord(self: *@This()) !?Record {
+        const max = self.header.number_of_answers + self.header.number_of_additional_resource_records + self.header.number_of_authority_resource_records;
+        if (self.r < max) {
+            self.r += 1;
+            return try Record.read(&self.buffer, &self.stream);
+        } else {
+            return null;
         }
-    };
-}
-
-pub fn messageReader(stream: anytype) !MessageReader(@TypeOf(stream)) {
-    return try MessageReader(@TypeOf(stream)).init(stream);
-}
+    }
+};
 
 /// The first part of a DNS Message.
 pub const Header = packed struct {
@@ -208,6 +219,8 @@ pub const Record = struct {
 
     /// Read resource from stream.
     pub fn read(buffer: []u8, stream: anytype) !@This() {
+        std.debug.assert(buffer.len > NAME_MAX_SIZE);
+
         const name = try readNameBuffer(buffer[0..NAME_MAX_SIZE], stream);
 
         var reader = stream.reader();
@@ -240,6 +253,7 @@ pub const Record = struct {
     }
 };
 
+/// Details of RecordData for TXT type.
 pub const TXTIter = struct {
     data: []const u8,
     pos: usize = 0,
@@ -273,6 +287,7 @@ pub const TXTIter = struct {
     }
 };
 
+/// Details of RecordData for SRV type.
 pub const SRV = struct {
     priority: u16,
     weight: u16,
@@ -300,9 +315,12 @@ pub const RecordData = union(enum) {
         var reader = stream.reader();
 
         // Make sure we leave the stream at the end of the data.
-        const len = try reader.readInt(u16, .big);
+        const data_len = try reader.readInt(u16, .big);
         const pos = try stream.getPos();
-        defer stream.seekTo(len + pos) catch unreachable;
+        defer stream.seekTo(data_len + pos) catch unreachable;
+
+        const len = @min(data_len, buffer.len); // questionable...
+        std.debug.assert(buffer.len >= len);
 
         switch (resource_type) {
             .A => {
@@ -531,6 +549,8 @@ test "read txt" {
 /// The end is byte '0'.
 /// A section maybe a pointer to another section elsewhere.
 fn readNameBuffer(name_buffer: []u8, stream: anytype) ![]const u8 {
+    std.debug.assert(name_buffer.len >= NAME_MAX_SIZE);
+
     var name_len: usize = 0;
 
     var seekBackTo: u64 = 0;
@@ -805,9 +825,7 @@ test "Read a message" {
         4, 3, 2, 1, // data
     };
 
-    var stream = std.io.fixedBufferStream(buffer[0..]);
-
-    var reply = try messageReader(&stream);
+    var reply = try MessageReader.init(buffer[0..]);
 
     try testing.expectEqual(reply.header.ID, 256);
     try testing.expectEqual(reply.header.flags.query_or_reply, .reply);
@@ -888,8 +906,7 @@ test "Write and read the same message" {
 
     const written = stream.getWritten();
 
-    var stream2 = std.io.fixedBufferStream(written);
-    var message_reader = try messageReader(&stream2);
+    var message_reader = try MessageReader.init(written);
 
     try testing.expectEqual(header, message_reader.header);
 

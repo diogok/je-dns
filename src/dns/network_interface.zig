@@ -45,6 +45,18 @@ test "get list of if address" {
     try testing.expect(ifs.len >= 1);
 }
 
+/// Check if this address is one of this machines addresses.
+pub fn isSelf(address: std.net.Address) bool {
+    var netif_iter = NetworkInterfaceAddressIterator.init();
+    defer netif_iter.deinit();
+    while (netif_iter.next()) |my_addr| {
+        if (address.eql(my_addr.address)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Iterator of all Network Interfaces Addresses
 pub const NetworkInterfaceAddressIterator = if (builtin.os.tag == .windows) WindowsNetworkInterfaceAddressesIterator else PosixNetworkInterfaceAddressesIterator;
 
