@@ -34,9 +34,13 @@ pub const mDNSService = struct {
     options: mDNSServiceOptions,
 
     /// Internal buffers
-    name_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
+        name_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
     /// Internal buffers
     host_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
+    /// Internal buffers
+    hostname_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
+    /// Internal buffers
+    service_name_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
     /// Internal buffers
     target_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
     /// Internal buffers
@@ -289,12 +293,12 @@ pub const mDNSService = struct {
 
     fn serviceName(self: *@This()) []const u8 {
         // Get our own hostname
-        _ = std.c.gethostname(&self.host_buffer, HOST_NAME_MAX);
-        const hostname = std.mem.span(@as([*c]u8, &self.host_buffer));
+        _ = std.c.gethostname(&self.hostname_buffer, HOST_NAME_MAX);
+        const hostname = std.mem.span(@as([*c]u8, &self.hostname_buffer));
 
         // name of this service instance
         const full_service_name = std.fmt.bufPrint(
-            &self.name_buffer,
+            &self.service_name_buffer,
             "{s}.{s}",
             .{
                 hostname,
@@ -307,8 +311,8 @@ pub const mDNSService = struct {
 
     fn targetHost(self: *@This()) []const u8 {
         // Get our own hostname
-        _ = std.c.gethostname(&self.host_buffer, HOST_NAME_MAX);
-        const hostname = std.mem.span(@as([*c]u8, &self.host_buffer));
+        _ = std.c.gethostname(&self.hostname_buffer, HOST_NAME_MAX);
+        const hostname = std.mem.span(@as([*c]u8, &self.hostname_buffer));
 
         const full_target_host = std.fmt.bufPrint(
             &self.target_buffer,
