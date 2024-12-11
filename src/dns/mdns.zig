@@ -38,6 +38,8 @@ pub const mDNSService = struct {
     /// Internal buffers
     host_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
     /// Internal buffers
+    target_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
+    /// Internal buffers
     addresses_buffer: [32]std.net.Address = undefined,
 
     /// Creates a new instance of this struct.
@@ -67,7 +69,7 @@ pub const mDNSService = struct {
     }
 
     /// This will query the network for other instances of this service.
-    /// The next call to handle will probably return new peers.
+    /// The next call to `handle` will probably return new peers.
     pub fn query(self: *@This()) !void {
         // get message bytes
         var buffer: [512]u8 = undefined;
@@ -98,7 +100,7 @@ pub const mDNSService = struct {
     /// It Should run constantly
     /// Might or might not return a peer
     /// Should not stop on null
-    pub fn handle(self: *@This()) !?Peer {
+    pub fn handle(self: *@This()) ?Peer {
         var buffer: [512]u8 = undefined;
         sockets: for (self.sockets) |socket| {
             receiving: while (true) {
@@ -109,30 +111,29 @@ pub const mDNSService = struct {
                 // if it fails it is probably invalid message
                 // so continue to try next message
                 var message_reader = data.MessageReader.init(buffer[0..len]) catch continue :receiving;
-
                 // handle the message
-                if (try self.handleMessage(&message_reader, socket.getFamily())) |peer| {
-                    // if the message contained a peer, return it
+                const maybe_peer = self.handleMessage(&message_reader) catch continue :receiving;
+
+                // if the message contained a peer, return it
+                if (maybe_peer) |peer| {
                     return peer;
                 }
+
                 // else just continue to next message or next socket
+                continue :receiving;
             }
         }
         return null;
     }
 
     /// This funtions check if this is a query or reply.
-    fn handleMessage(self: *@This(), message_reader: *data.MessageReader, family: net.Family) !?Peer {
+    fn handleMessage(self: *@This(), message_reader: *data.MessageReader) !?Peer {
         switch (message_reader.header.flags.query_or_reply) {
             .reply => {
                 return try self.handleReply(message_reader);
             },
             .query => {
-                while (try message_reader.nextQuestion()) |q| {
-                    if (std.mem.eql(u8, q.name, self.service.name)) {
-                        try self.respond(family);
-                    }
-                }
+                try self.handleQuery(message_reader);
                 return null;
             },
         }
@@ -155,6 +156,10 @@ pub const mDNSService = struct {
                     if (std.mem.eql(u8, record.name, self.service.name)) {
                         std.mem.copyForwards(u8, &self.name_buffer, record.data.ptr);
                         peer.name = self.name_buffer[0..record.data.ptr.len];
+                        if (std.mem.eql(u8, peer.name, self.serviceName())) {
+                            // this is our own message
+                            return null;
+                        }
                         peer.ttl_in_seconds = record.ttl;
                     }
                 },
@@ -170,13 +175,10 @@ pub const mDNSService = struct {
                     // get the IP of each host
                     if (std.mem.eql(u8, host, record.name)) {
                         var addr = record.data.ip;
-                        // check if this is not our own address
-                        if (!netif.isSelf(addr)) {
-                            addr.setPort(port);
-                            // add to this peer list of addresses
-                            self.addresses_buffer[addresses_len] = addr;
-                            addresses_len += 1;
-                        }
+                        addr.setPort(port);
+                        // add to this peer list of addresses
+                        self.addresses_buffer[addresses_len] = addr;
+                        addresses_len += 1;
                     }
                 },
                 else => {},
@@ -192,32 +194,17 @@ pub const mDNSService = struct {
         }
     }
 
+    /// handle a query, responding if is is about our service.
+    fn handleQuery(self: *@This(), message_reader: *data.MessageReader) !void {
+        while (try message_reader.nextQuestion()) |q| {
+            if (std.mem.eql(u8, q.name, self.service.name)) {
+                try self.respond();
+            }
+        }
+    }
+
     /// Response with our service information.
-    fn respond(self: *@This(), family: net.Family) !void {
-        // Get our own hostname
-        _ = std.c.gethostname(&self.host_buffer, HOST_NAME_MAX);
-        const hostname = std.mem.span(@as([*c]u8, &self.host_buffer));
-
-        // name of this service instance
-        const full_service_name = std.fmt.bufPrint(
-            &self.name_buffer,
-            "{s}.{s}",
-            .{
-                hostname,
-                self.service.name,
-            },
-        ) catch unreachable;
-
-        // this host mdns name
-        var target_buffer: [data.NAME_MAX_SIZE]u8 = undefined;
-        const target_host = std.fmt.bufPrint(
-            &target_buffer,
-            "{s}.local",
-            .{
-                hostname,
-            },
-        ) catch unreachable;
-
+    fn respond(self: *@This()) !void {
         // Query network interface addresses
         var netif_iter = netif.NetworkInterfaceAddressIterator.init();
         defer netif_iter.deinit();
@@ -225,21 +212,12 @@ pub const mDNSService = struct {
         // Count how many addresses we have to send
         var hosts_count: u8 = 0;
         while (netif_iter.next()) |a| {
-            // Skip localhost
-            if (a.address.eql(net.ipv4_localhost) or a.address.eql(net.ipv6_localhost)) {
-                continue;
-            }
-            // only send active addresses
-            if (!a.up) {
-                continue;
-            }
-            // only send if the same family as requested
-            if (family == .IPv4 and a.family == .IPv4) {
-                hosts_count += 1;
-            } else if (family == .IPv6 and a.family == .IPv6) {
+            if (self.usable(a)) {
                 hosts_count += 1;
             }
         }
+
+        // reset addresses
         netif_iter.reset();
 
         // prepare message bytes
@@ -262,14 +240,14 @@ pub const mDNSService = struct {
             .resource_type = .PTR,
             .ttl = self.options.ttl_in_seconds,
             .data = .{
-                .ptr = full_service_name,
+                .ptr = self.serviceName(),
             },
         };
         try record.writeTo(&stream);
 
         // Send the port and host
         record = data.Record{
-            .name = full_service_name,
+            .name = self.serviceName(),
             .resource_type = .SRV,
             .ttl = self.options.ttl_in_seconds,
             .data = .{
@@ -277,7 +255,7 @@ pub const mDNSService = struct {
                     .port = self.service.port,
                     .priority = 0,
                     .weight = 0,
-                    .target = target_host,
+                    .target = self.targetHost(),
                 },
             },
         };
@@ -285,33 +263,21 @@ pub const mDNSService = struct {
 
         // send available relevant addresses for our host
         while (netif_iter.next()) |addr| {
-            if (!addr.up) {
+            if (!self.usable(addr)) {
                 continue;
             }
-            if (addr.address.eql(net.ipv4_localhost) or addr.address.eql(net.ipv6_localhost)) {
-                continue;
+            record = data.Record{
+                .name = self.targetHost(),
+                .resource_type = .AAAA,
+                .ttl = self.options.ttl_in_seconds,
+                .data = .{
+                    .ip = addr.address,
+                },
+            };
+            if (addr.family == .IPv4) {
+                record.resource_type = .A;
             }
-            if (family == .IPv4 and addr.family == .IPv4) {
-                record = data.Record{
-                    .name = target_host,
-                    .resource_type = .A,
-                    .ttl = self.options.ttl_in_seconds,
-                    .data = .{
-                        .ip = addr.address,
-                    },
-                };
-                try record.writeTo(&stream);
-            } else if (family == .IPv6 and addr.family == .IPv6) {
-                record = data.Record{
-                    .name = target_host,
-                    .resource_type = .AAAA,
-                    .ttl = self.options.ttl_in_seconds,
-                    .data = .{
-                        .ip = addr.address,
-                    },
-                };
-                try record.writeTo(&stream);
-            }
+            try record.writeTo(&stream);
         }
 
         // Sends the message to all sockets
@@ -320,6 +286,52 @@ pub const mDNSService = struct {
             try socket.sendBytes(bytes);
         }
     }
+
+    fn serviceName(self: *@This()) []const u8 {
+        // Get our own hostname
+        _ = std.c.gethostname(&self.host_buffer, HOST_NAME_MAX);
+        const hostname = std.mem.span(@as([*c]u8, &self.host_buffer));
+
+        // name of this service instance
+        const full_service_name = std.fmt.bufPrint(
+            &self.name_buffer,
+            "{s}.{s}",
+            .{
+                hostname,
+                self.service.name,
+            },
+        ) catch unreachable;
+
+        return full_service_name;
+    }
+
+    fn targetHost(self: *@This()) []const u8 {
+        // Get our own hostname
+        _ = std.c.gethostname(&self.host_buffer, HOST_NAME_MAX);
+        const hostname = std.mem.span(@as([*c]u8, &self.host_buffer));
+
+        const full_target_host = std.fmt.bufPrint(
+            &self.target_buffer,
+            "{s}.local",
+            .{
+                hostname,
+            },
+        ) catch unreachable;
+        return full_target_host;
+    }
+
+    fn usable(_: *@This(), address: netif.NetworkInterfaceAddress) bool {
+        // Skip localhost
+        if (address.address.eql(net.ipv4_localhost) or address.address.eql(net.ipv6_localhost)) {
+            return false;
+        }
+        // only send active addresses
+        if (!address.up) {
+            return false;
+        }
+        // good to respond
+        return true;
+    }
 };
 
 test "Test a service" {
@@ -327,9 +339,13 @@ test "Test a service" {
     var mdns = try mDNSService.init(service, .{});
     defer mdns.deinit();
     try mdns.query();
-    _ = try mdns.handle();
-    _ = try mdns.handle();
-    _ = try mdns.handle();
+
+    var p0 = mdns.handle();
+    try testing.expect(p0 == null);
+    p0 = mdns.handle();
+    try testing.expect(p0 == null);
+    p0 = mdns.handle();
+    try testing.expect(p0 == null);
 }
 
 /// This is another instance of our service in this network.

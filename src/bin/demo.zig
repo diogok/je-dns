@@ -28,7 +28,7 @@ pub fn main() !void {
         // Handle function will both receive queries and answer with our address.
         // As well as receive answers and return peers.
         // You should keep calling it forever to be sure we can always answer queries.
-        if (try mdns.handle()) |peer| {
+        if (mdns.handle()) |peer| {
             log.info("Peer {s}", .{peer.name});
             for (peer.addresses) |addr| {
                 log.info("Addr {any}", .{addr});

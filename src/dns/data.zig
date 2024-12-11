@@ -15,7 +15,7 @@ const PacketStream = std.io.FixedBufferStream([]const u8);
 
 /// An reader and iterator to read a DNS message from a UDP packet.
 /// Headers are read on initialization.
-/// You should read all the Questions, them all the records.
+/// You should read all the Questions, them all the Records.
 pub const MessageReader = struct {
     buffer: [PACKET_SIZE]u8 = undefined,
     stream: PacketStream = undefined,

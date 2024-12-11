@@ -8,16 +8,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/dns/root.zig"),
     });
 
-    const artifacts = [_][]const u8{
-        "demo",
-    };
-
-    for (artifacts[0..]) |artifact| {
+    {
         const exe = b.addExecutable(.{
-            .name = artifact,
+            .name = "demo",
             .target = target,
             .optimize = optimize,
-            .root_source_file = b.path(b.fmt("src/bin/{s}.zig", .{artifact})),
+            .root_source_file = b.path("src/bin/demo.zig"),
             .link_libc = true,
         });
         exe.root_module.addImport("dns", dns);
@@ -25,7 +21,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
-        const run_step = b.step(b.fmt("run-{s}", .{artifact}), "Run example");
+        const run_step = b.step("run", "Run example");
         run_step.dependOn(&run_cmd.step);
     }
 
