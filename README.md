@@ -4,9 +4,11 @@ This library implements just enought DNS to work with mDNS (Multicast DNS, resol
 
 For usage see the [documentation](https://diogok.github.io/je-mdns) or the demo at [src/bin](src/bin/demo.zig).
 
-## Links
+## References
 
-Main reference used was: http://www.tcpipguide.com/free/t_TCPIPDomainNameSystemDNS.htm and some of the RFCs.
+Main reference used was: http://www.tcpipguide.com/free/t_TCPIPDomainNameSystemDNS.htm.
+
+Also the RFCs and Wireshark.
 
 ## License
 
