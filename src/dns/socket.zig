@@ -165,8 +165,8 @@ pub fn makeTimevalue(millis: u32) std.posix.timeval {
     const micros: i32 = @as(i32, @intCast(millis)) * 1000;
 
     var timeval: std.posix.timeval = undefined;
-    timeval.tv_sec = @as(c_long, @intCast(@divTrunc(micros, 1000000)));
-    timeval.tv_usec = @as(c_long, @intCast(@mod(micros, 1000000)));
+    timeval.tv_sec = @intCast(@divTrunc(micros, 1000000));
+    timeval.tv_usec = @intCast(@mod(micros, 1000000));
 
     return timeval;
 }
@@ -385,7 +385,7 @@ const IP_ADD_MEMBERSHIP = c.IP_ADD_MEMBERSHIP;
 const IPV6_MULTICAST_IF = c.IPV6_MULTICAST_IF;
 const IPV6_MULTICAST_HOPS = c.IPV6_MULTICAST_HOPS;
 const IPV6_MULTICAST_LOOP = c.IPV6_MULTICAST_LOOP;
-const IPV6_ADD_MEMBERSHIP = c.IPV6_ADD_MEMBERSHIP;
+const IPV6_ADD_MEMBERSHIP = if (builtin.os.tag == .macos) c.IPV6_JOIN_GROUP else c.IPV6_ADD_MEMBERSHIP;
 
 pub const ipv4_localhost = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 0);
 pub const ipv6_localhost = std.net.Address.initIp6([16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0);

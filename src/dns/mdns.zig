@@ -34,7 +34,7 @@ pub const mDNSService = struct {
     options: mDNSServiceOptions,
 
     /// Internal buffers
-        name_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
+    name_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
     /// Internal buffers
     host_buffer: [data.NAME_MAX_SIZE]u8 = undefined,
     /// Internal buffers
@@ -47,7 +47,7 @@ pub const mDNSService = struct {
     addresses_buffer: [32]std.net.Address = undefined,
 
     /// Creates a new instance of this struct.
-    /// Should call deinit on the returned object once done.
+    /// Should call deinit when done.
     pub fn init(service: Service, options: mDNSServiceOptions) !@This() {
         const ipv4 = try net.Socket.init(data.mdns_ipv4_address, options.socket_options);
         try ipv4.bind();
