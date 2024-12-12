@@ -1,5 +1,5 @@
 .{
-	.name = "je-mdns",
+	.name = "je-dns",
 	.version = "0.0.0",
 	.paths =  .{"src"},
 	.dependencies =.{
